@@ -1,0 +1,10 @@
+[Unit]
+Description=Three daily WIS organization source intakes on the hub server
+
+[Timer]
+OnCalendar=*-*-* 08,13,18:30:00 Asia/Shanghai
+Persistent=true
+Unit=wis-source-organization.service
+
+[Install]
+WantedBy=timers.target

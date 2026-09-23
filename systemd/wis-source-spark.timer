@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily WIS Spark source intake on the hub server
+
+[Timer]
+OnCalendar=*-*-* 08:30:00 Asia/Shanghai
+Persistent=true
+Unit=wis-source-spark.service
+
+[Install]
+WantedBy=timers.target

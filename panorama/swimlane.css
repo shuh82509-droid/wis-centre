@@ -1,0 +1,26 @@
+.swimlane-shell .canvas-viewport{height:clamp(460px,calc(100dvh - 320px),1000px);background:#f5f9fc;scrollbar-width:auto;scrollbar-gutter:stable}
+.swimlane-shell .canvas-sizer{margin:0;overflow:clip}
+.swimlane-grid{gap:28px;padding:18px;align-items:start}
+.swimlane{min-width:0;position:relative}
+.swimlane-route{display:flex;align-items:center;justify-content:center;gap:9px;width:100%;height:42px;padding:8px 14px;border:1px solid #9fcbe5;border-radius:5px;background:#e8f4fc;color:#066fac;text-align:center;line-height:1.5}
+.swimlane-route:hover{background:#dceefb;border-color:#087fc8}
+.swimlane-route span{font-size:11px;color:#437994;font-variant-numeric:tabular-nums}.swimlane-route b{font-size:14px;font-weight:600}
+.swimlane-panel{margin-top:16px;background:#edf3f8;border:1px solid #ccdde9;border-radius:10px;overflow:hidden}
+.swimlane-head{padding:16px 15px 14px;background:#fff;border-top:3px solid #73b4dd;border-bottom:1px solid #d5e3ed;min-height:130px}
+.swimlane-name{display:flex;align-items:flex-start;gap:8px;min-height:44px}
+.swimlane-name .lane-code{flex-shrink:0;margin-top:2px}.swimlane-name h2{margin:0;font-size:16px;line-height:1.45;font-weight:650;overflow-wrap:anywhere}
+.swimlane-head>p{margin:8px 0;font-size:12px;line-height:1.5;color:#536d83}
+.swimlane-meta{display:flex;justify-content:space-between;align-items:flex-start;gap:8px;font-size:11px;line-height:1.5;color:#536d83}.swimlane-meta>span:last-child{white-space:nowrap}
+.swimlane-stages{display:flex;flex-direction:column;gap:30px;padding:20px 24px;margin:0;list-style:none}.swimlane-stages>li{min-width:0;display:block}
+.swimlane-stage{display:flex;flex-direction:column;align-items:stretch;gap:9px;width:100%;min-height:146px;padding:13px 12px;border:1px solid #bfd5e5;border-radius:7px;background:#fff;text-align:left;color:#233f55;position:relative}
+.swimlane-stage:hover{border-color:#4499ce;background:#fbfdff}.swimlane-stage.selected{border-color:#087fc8;box-shadow:0 0 0 1px #087fc8}.swimlane-stage.search-match{border-color:#087fc8;background:#f1f9ff}
+.swimlane-stage-title{display:flex;align-items:flex-start;gap:8px;line-height:1.6}.swimlane-stage-title>span{font-size:11px;line-height:2;color:#527995;font-variant-numeric:tabular-nums}.swimlane-stage-title strong{font-size:14px;font-weight:600;overflow-wrap:anywhere}
+.swimlane-stage-output{font-size:12px;line-height:1.7;color:#536d83;overflow-wrap:anywhere}
+.swimlane-stage-meta{margin-top:auto;display:flex;align-items:center;justify-content:space-between;gap:7px;color:#4c718c;font-size:11px;line-height:1.6}.swimlane-ready{background:#e6f3fd;border-radius:4px;padding:2px 5px;color:#0871b0;white-space:nowrap}
+.swimlane-stage-open{font-size:12px;color:#0677ba;display:flex;justify-content:space-between;align-items:center;line-height:1.4}
+.swimlane-output{margin:0 15px 16px;padding:11px 12px;border:1px dashed #a9c7dc;border-radius:6px;background:#f7fbfe;font-size:12px;color:#476a82;line-height:1.7}.swimlane-output b{font-size:12px;font-weight:600}.swimlane-output p{margin:5px 0 0;overflow-wrap:anywhere}
+.swimlane-independent .swimlane-route{background:#f0f5f8;border-color:#c5d5df;color:#4c697e}.swimlane-independent .swimlane-head{border-top-color:#a4bdce}
+.swimlane-version{margin:5px 0 0;font-size:11px;color:#547185;line-height:1.6}.swimlane-shell .canvas-edge{stroke-width:1.7}.swimlane-shell .canvas-edge.inactive{stroke:#91a9ba;stroke-width:1.4}
+.swimlane-relations{background:#fff;border-top:1px solid #d6e5ef;padding:0 16px}.swimlane-relations>summary{font-size:12px}.swimlane-relations ul{list-style:none;margin:0;padding:0 0 12px;display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:10px 20px}.swimlane-relations li{font-size:12px;line-height:1.6;border-top:1px solid #e2eaf0;padding-top:8px}.swimlane-relations li>span:first-child{display:block;color:#2f516b;font-weight:600}.relation-state{display:inline-block;color:#0877b9;margin-top:3px}.relation-state.inactive{color:#627b8e}.swimlane-relations small{display:block;font-size:11px;color:#597184;margin-top:2px}
+@media(max-width:720px){.swimlane-shell .canvas-viewport{height:calc(100dvh - 280px);min-height:460px}.swimlane-shell .canvas-tools{align-items:flex-start}.swimlane-shell .canvas-zoom{justify-content:flex-start}.swimlane-relations{padding:0 10px}.swimlane-relations ul{grid-template-columns:1fr}}
+@media(prefers-reduced-motion:no-preference){.swimlane-stage,.swimlane-route{transition:background-color .15s ease-out,border-color .15s ease-out}}

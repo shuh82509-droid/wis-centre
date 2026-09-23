@@ -1,0 +1,76 @@
+// Isolated browser + local runtime. This is not an OA login or colleague acceptance.
+import assert from 'node:assert/strict';
+import {createServer} from 'node:http';
+import {readFileSync,writeFileSync,mkdirSync,mkdtempSync,rmSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join,resolve,sep} from 'node:path';
+import {createRequire} from 'node:module';
+import {fileURLToPath} from 'node:url';
+import {createHash} from 'node:crypto';
+import {WorkflowStore} from '../workflow-store.mjs';
+import {FlowRuntime} from '../flow-runtime.mjs';
+import {FlowBlueprints} from '../flow-blueprints.mjs';
+import {FlowDelivery} from '../flow-delivery.mjs';
+import {FlowEvidence} from '../flow-evidence.mjs';
+import {createFlowHandler} from '../flow-http.mjs';
+import {modules} from '../flow-catalog.mjs';
+const require=createRequire('C:/Users/202606/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/package.json');
+const {chromium}=require('playwright');
+const root=resolve(tmpdir()),temp=mkdtempSync(join(root,'wis-flow-browser-isolated-'));
+const out=new URL('../qa-handoff-browser/',import.meta.url);mkdirSync(out,{recursive:true});
+const people=[{number:'ISOLATED-M',name:'隔离验收主管',center:'本地测试中心',role:'director'},{number:'ISOLATED-A',name:'隔离搜索同事',center:'本地测试中心',role:'specialist'}].map(p=>({...p,active:true,modules:Object.values(modules).filter(Boolean)}));
+const access={enabled:true,canManage:true,department:true,user:people[0],modules:people[0].modules};
+const store=new WorkflowStore(join(temp,'store.json')),runtime=new FlowRuntime(store,{people:()=>people,canNotify:()=>true});
+const blueprints=new FlowBlueprints(runtime);runtime.blueprints=blueprints;
+const sources={data:{cloud:{state:'connected'}},people:()=>people,view:()=>({sources:[{id:'cloud',name:'本地隔离素材桩',state:'connected'}],inventory:[],jobs:[],renders:[]})};
+const readCloud=async()=>({status:200,payload:{categories:[{name:'晶润紧致眼膜'}]}});
+const delivery=new FlowDelivery({runtime,root:join(temp,'attachments'),readCloud});
+const notifier={status:()=>({enabled:false,configured:false,mapped:2,total:2}),recipient:()=>true};
+const handler=createFlowHandler({runtime,blueprints,delivery,sources,notifier,evidenceReader:new FlowEvidence({sources,readCloud}),currentSession:async()=>({status:200,payload:{isolated:true}}),accessFor:()=>access,previewFor:()=>({active:false}),readJson:async req=>{const chunks=[];for await(const b of req)chunks.push(b);return JSON.parse(Buffer.concat(chunks));},sendJson:(res,status,body)=>{res.writeHead(status,{'content-type':'application/json'});res.end(JSON.stringify(body));}});
+const base='/fd-026222/wis-marketing-hub/',candidate=base+'l2-candidate/';
+const requests=[],errors=[],checks=[];let browser;
+const server=createServer(async(req,res)=>{try{requests.push({method:req.method,path:req.url});const url=new URL(req.url,'http://127.0.0.1');if(url.pathname.startsWith(candidate+'api/flows/')){url.pathname=url.pathname.slice((base+'l2-candidate').length);await handler(req,res,url);return;}if(url.pathname==='/fd-026222/wis-video-center/api/facets'){res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({categories:[{name:'晶润紧致眼膜'}]}));return;}if(url.pathname===candidate){res.writeHead(200,{'content-type':'text/html; charset=utf-8'});res.end(readFileSync(new URL('index.html',import.meta.url)));return;}res.writeHead(404);res.end('isolated fixture has no external routes');}catch(e){errors.push('local server: '+e.stack);res.writeHead(500);res.end('isolated failure');}});
+try{
+ let parent=runtime.create(access,{workflow:'05',title:'本地验收：经营复盘派发后续行动',acceptance:'取得真实下游编号后再办理结项',owner:people[0].number,manager:people[0].number},'browser-parent-create');
+ while(parent.runtime.nodes.find(n=>n.id==='W05.S5.E1').state!=='ready'){
+  const n=parent.runtime.nodes.find(n=>n.state==='ready');
+  const proof={url:'https://example.test/isolated-proof',reference:'隔离浏览器合成证据',version:'1'};
+  parent=runtime.command(access,parent.id,'complete',{expectedVersion:parent.version,nodeId:n.id,note:'隔离合成前置证据',evidence:[proof]},'browser-prior-'+n.id,{verifiedEvidence:n.evidenceKind!=='human_attested'?[{...proof,source:'isolated_fixture'}]:null});
+ }
+ await new Promise(r=>server.listen(0,'127.0.0.1',r));const origin='http://127.0.0.1:'+server.address().port;
+ browser=await chromium.launch({executablePath:'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',headless:true});
+ const context=await browser.newContext({viewport:{width:1440,height:1100}});
+ await context.route('**/*',route=>new URL(route.request().url()).origin===origin?route.continue():route.abort());
+ const page=await context.newPage();page.on('pageerror',e=>errors.push(e.stack));
+ await page.goto(origin+candidate+'?task='+parent.id);
+ await page.getByRole('button',{name:'现在发起下游',exact:true}).waitFor();
+ await page.screenshot({path:fileURLToPath(new URL('01-node9-ready.png',out)),fullPage:true});
+ await page.getByRole('button',{name:'现在发起下游',exact:true}).click();
+ await page.locator('#modal [name=workflow]').selectOption('01');
+ await page.locator('#modal [name=title]').fill('本地验收：复盘派发一创行动');
+ await page.locator('#modal [name=acceptance]').fill('按照经营复盘确定的行动准备一创交付');
+ await page.getByRole('button',{name:'创建下游任务',exact:true}).click();
+ await page.locator('#modal').waitFor({state:'hidden'});
+ const latest=runtime.get(access,parent.id),childId=latest.runtime.handoff.taskId;
+ assert.ok(childId);assert.equal(store.read().tasks.length,2);
+ await page.getByRole('button',{name:'打开下游任务 →',exact:true}).waitFor();
+ assert.ok((await page.locator('#drawer').innerText()).includes(childId));
+ assert.equal(latest.runtime.nodes.find(n=>n.id==='W05.S5.E1').state,'ready');
+ assert.equal(latest.runtime.nodes.find(n=>n.id==='W05.S5.E2').state,'pending');
+ assert.equal(latest.runtime.state,'running');
+ await page.screenshot({path:fileURLToPath(new URL('02-child-id-parent-pending.png',out)),fullPage:true});
+ await page.reload();await page.getByRole('button',{name:'打开下游任务 →',exact:true}).waitFor();
+ assert.equal(await page.getByRole('button',{name:'现在发起下游',exact:true}).count(),0);
+ await page.getByRole('button',{name:'打开下游任务 →',exact:true}).click();
+ await page.getByRole('button',{name:'查看上游任务',exact:true}).waitFor();
+ assert.ok((await page.locator('#drawer').innerText()).includes(childId));
+ await page.getByRole('button',{name:'查看上游任务',exact:true}).click();
+ await page.getByRole('button',{name:'打开下游任务 →',exact:true}).waitFor();
+ assert.equal(store.read().flowNotifications.filter(n=>n.taskId===childId&&n.kind==='ready').length,1);
+ assert.equal(requests.filter(r=>r.method==='POST'&&r.path.endsWith('/handoff')).length,1);
+ assert.equal(requests.filter(r=>r.path.startsWith(base+'api/flows/')).length,0);
+ assert.deepEqual(errors,[]);
+ writeFileSync(new URL('acceptance.json',out),JSON.stringify({boundary:'isolated browser fixture, synthetic identity/evidence; no real OA or Feishu message',passed:true,parentId:parent.id,childId,checks:['node9 availability','actual form POST through flow HTTP handler','child persisted','parent nodes unchanged','one outbox notice','reload prevents duplicate button','upstream downstream links','no external request'],errors,requests},null,2));
+ console.log(JSON.stringify({passed:true,parentId:parent.id,childId,output:out.href}));
+}catch(e){writeFileSync(new URL('failure.json',out),JSON.stringify({error:e.stack,errors,requests},null,2));throw e;}
+finally{await browser?.close();await new Promise(r=>server.close(r));assert.ok(resolve(temp).startsWith(root+sep));rmSync(temp,{recursive:true,force:true});}

@@ -1,0 +1,8 @@
+[Unit]
+Description=WIS hub allowlisted Feishu source refresh (Spark)
+After=default.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/brand-marketing/fandow-apps/fd-026222/source-refresh/server-source-refresh-runner.sh spark
+TimeoutStartSec=20min

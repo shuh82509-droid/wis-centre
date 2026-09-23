@@ -1,0 +1,15 @@
+# Installed dependencies
+node_modules/
+
+# Build and release artifacts
+dist/
+dist-*/
+panorama/dist/
+
+# Local configuration and runtime output
+.env
+.env.*
+!.env.example
+*.log
+coverage/
+.vite/

@@ -1,0 +1,128 @@
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { startFixture } from './workflow-fixture.mjs';
+
+const f=await startFixture();
+const checks=[];
+const check=(name,fn)=>{fn();checks.push(name);};
+const taskOf=result=>{assert.ok(result.status<300,JSON.stringify(result));return result.payload;};
+try {
+  const initial=await f.request('/api/task-center/overview');
+  check('真实 HTTP 路由读取六条模板',()=>{assert.equal(initial.status,200);assert.equal(initial.payload.templates.length,6);assert.equal(initial.payload.schemaVersion,3);});
+  for(const role of ['outsider','external','expired']) {
+    const denied=await f.request('/api/task-center/overview',role);
+    check(role+' 不能读取试点任务',()=>assert.equal(denied.status,role==='expired'?401:403));
+  }
+  check('专员不能下发',()=>{});
+  assert.equal((await f.create({},'specialist')).status,403);
+  const ids=initial.payload.assignees.slice(0,2).map(p=>p.number);
+  const assigned=taskOf(await f.create({assignees:ids}));
+  check('真实目录支持一位主责与多位协作',()=>{assert.equal(assigned.primaryOwner.number,ids[0]);assert.equal(assigned.collaborators[0].number,ids[1]);});
+  assert.equal((await f.create({assignees:['FD-INVALID']})).status,400);
+  const duplicateKey=randomUUID();
+  const one=taskOf(await f.create({title:'重复提交验收'},'manager',{'Idempotency-Key':duplicateKey}));
+  const two=taskOf(await f.create({title:'重复提交验收'},'manager',{'Idempotency-Key':duplicateKey}));
+  check('创建丢包重试只产生一个任务',()=>assert.equal(one.id,two.id));
+  assert.equal((await f.create({title:'不同内容'},'manager',{'Idempotency-Key':duplicateKey})).status,409);
+  assert.equal((await f.create({},'manager',{'Idempotency-Key':''})).status,400);
+  assert.equal((await f.create({},'manager',{Origin:'https://evil.example'})).status,403);
+  assert.equal((await f.create({},'manager',{'Content-Type':'text/plain'})).status,415);
+  checks.push('重复键冲突、缺少编号、跨站及非 JSON 请求被拦截');
+
+  let radar=taskOf(await f.create({sourceKind:'creative_radar',sourceUrl:'https://example.test/radar',dispatchMode:'formal'}));
+  check('雷达不得绕过机会阶段',()=>assert.equal(radar.kind,'opportunity'));
+  radar=taskOf(await f.command(radar,'convert'));
+  const racers=await Promise.all(['specialist','specialist2'].map(role=>f.command(radar,'claim',{},role)));
+  check('并发领取只能一人成功',()=>assert.equal(racers.filter(r=>r.status===200).length,1));
+  let task=racers.find(r=>r.status===200).payload;
+  const owner=task.assignee.number==='FD-QA-001'?'specialist':'specialist2';
+  const other=owner==='specialist'?'specialist2':'specialist';
+  assert.equal((await f.request('/api/task-center/overview',other)).payload.tasks.some(t=>t.id===task.id),false);
+  assert.equal((await f.command(task,'status',{status:'pending_review'},owner)).status,409);
+  task=taskOf(await f.command(task,'output',{url:'https://example.test/output',assetId:'asset1',assetVersion:'v1',productionJobId:'job1',summary:'真实 HTTP 交付格式测试'},owner));
+  task=taskOf(await f.command(task,'status',{status:'pending_review'},owner));
+  assert.equal((await f.command(task,'status',{status:'approved'},owner)).status,403);
+  task=taskOf(await f.command(task,'status',{status:'approved'}));
+  assert.equal((await f.command(task,'status',{status:'pushed'})).status,409);
+  checks.push('交付证据、专员隔离及审批边界生效');
+  task=taskOf(await f.command(task,'delivery',{platform:'qianchuan',accountId:'account1',planId:'plan1'}));
+  const d=task.deliveries[0];
+  const receipt={eventId:randomUUID(),type:'delivery_receipt',taskId:task.id,deliveryId:d.id,assetId:d.assetId,assetVersion:d.assetVersion,platform:d.platform,accountId:d.accountId,planId:d.planId,state:'succeeded',verified:true,receiptId:'receipt1',receiptUrl:'https://example.test/receipt'};
+  assert.equal((await f.service(receipt,{'x-workflow-signature':'0'.repeat(64)})).status,401);
+  assert.equal((await f.service({...receipt,eventId:randomUUID(),assetVersion:'v2'})).status,409);
+  assert.equal((await f.service(receipt)).status,200);
+  assert.equal((await f.service(receipt)).payload.duplicate,true);
+  const feedback={eventId:randomUUID(),type:'business_feedback',taskId:task.id,deliveryId:d.id,businessDate:'2026-09-07',sourceUrl:'https://example.test/data',coverage:'partial',metrics:{netGsv:null,spend:10}};
+  assert.equal((await f.service(feedback)).status,200);
+  let readback=(await f.request('/api/task-center/overview',owner)).payload.tasks.find(t=>t.id===task.id);
+  check('缺失指标保留 null 且未虚报完成',()=>{assert.equal(readback.feedback[0].metrics.netGsv,null);assert.equal(readback.status,'pushed');});
+  assert.equal((await f.service({...feedback,eventId:randomUUID(),coverage:'complete',metrics:{netGsv:30,spend:10}})).status,200);
+  readback=(await f.request('/api/task-center/overview',owner)).payload.tasks.find(t=>t.id===task.id);
+  check('核验回执和完整回流后闭环',()=>assert.equal(readback.status,'completed'));
+  assert.equal((await f.service({...receipt,eventId:randomUUID()})).status,200);
+  assert.equal((await f.request('/api/task-center/overview',owner)).payload.tasks.find(t=>t.id===task.id).status,'completed');
+  checks.push('重复成功回执不能把已完成任务退回');
+
+  let action=taskOf(await f.create({workflow:'04'}));
+  action=taskOf(await f.command(action,'claim',{},owner));
+  action=taskOf(await f.command(action,'output',{assetId:'record1',assetVersion:'r1',url:'https://example.test/meeting'},owner));
+  action=taskOf(await f.command(action,'status',{status:'pending_review'},owner));
+  action=taskOf(await f.command(action,'status',{status:'approved'}));
+  action=taskOf(await f.command(action,'accept',{note:'执行记录与改进措施已核对'}));
+  check('直播或行动项走主管验收',()=>assert.equal(action.status,'completed'));
+
+  let incident=taskOf(await f.create({title:'故障恢复验收'}));
+  incident=taskOf(await f.command(incident,'claim',{},owner));
+  incident=taskOf(await f.command(incident,'incident',{note:'网络中断',stage:'upload'},owner));
+  incident=taskOf(await f.command(incident,'incident',{note:'再次反馈',stage:'upload'},owner));
+  const overview=(await f.request('/api/task-center/overview','director')).payload;
+  const issues=overview.assistance.filter(i=>i.taskId===incident.id);
+  assert.equal(issues.length,1);
+  assert.equal((await f.command(incident,'resolve_incident',{incidentId:issues[0].id,note:'已核验恢复'},'manager')).status,403);
+  incident=taskOf(await f.command(incident,'resolve_incident',{incidentId:issues[0].id,note:'已核验恢复'},'director'));
+  check('故障去重且只有维护人可关闭',()=>assert.ok(incident.events.some(e=>e.action==='resolve_incident')));
+  const ai=await f.command(incident,'prepare',{},owner);
+  check('未启用 AI 时不调用付费服务',()=>{assert.equal(ai.status,200);assert.equal(ai.payload.state,'manual');assert.equal(ai.payload.calls,0);});
+
+  const bytes=Buffer.from('00000020667479706d703432','hex');
+  let cloud=taskOf(await f.create({title:'[演练] 云管家实物关联'}));
+  cloud=taskOf(await f.command(cloud,'claim',{},owner));
+  cloud=taskOf(await f.command(cloud,'cloud_output',{assetId:'12'},owner));
+  assert.equal(cloud.outputs[0].cloudSnapshot.id,'12');
+  assert.equal(cloud.outputs[0].assetVersion.length,24);
+  assert.equal(cloud.outputs[0].url,'https://app.fandow.top/fd-026222/wis-video-center/');
+  const outputLink=`${f.base}/api/task-center/tasks/${cloud.id}/outputs/${cloud.outputs[0].id}/content`;
+  const freshContent=await fetch(outputLink,{headers:{Cookie:`dashboard_role=${owner}`},redirect:'manual'});
+  assert.equal(freshContent.status,303);assert.equal(freshContent.headers.get('location'),'https://example.test/fixture.mp4');assert.equal(freshContent.headers.get('cache-control'),'no-store');
+  assert.equal((await fetch(outputLink,{headers:{Cookie:'dashboard_role=outsider'},redirect:'manual'})).status,403);
+  checks.push('交付文件按当前权限重新获取临时链接，保存记录不含临时签名');
+  cloud=taskOf(await f.command(cloud,'status',{status:'pending_review'},owner));
+  cloud=taskOf(await f.command(cloud,'status',{status:'approved'}));
+  cloud=taskOf(await f.command(cloud,'delivery',{platform:'qianchuan',accountId:'account1',planId:'plan1'}));
+  const cloudReadback=await f.command(cloud,'reconcile',{deliveryId:cloud.deliveries[0].id,cloudTaskId:'cloud-job-1'},owner);
+  assert.equal(cloudReadback.status,200,JSON.stringify(cloudReadback));
+  check('云管家资产版本和已保存平台回执通过只读接口关联',()=>assert.equal(cloudReadback.payload.state,'succeeded'));
+  const video=taskOf(await f.create({sourceKind:'video_file',video:{filename:'qa.mp4',mimeType:'video/mp4',dataBase64:bytes.toString('base64')}}));
+  const content=await fetch(f.base+'/'+video.attachment.contentUrl,{headers:{Cookie:'dashboard_role=specialist'}});
+  check('参考文件可读但不暴露内部路径',()=>{assert.equal(content.status,200);assert.equal('storageName' in video.attachment,false);});
+  assert.deepEqual(Buffer.from(await content.arrayBuffer()),bytes);
+  const forbiddenContent=await fetch(f.base+'/'+video.attachment.contentUrl,{headers:{Cookie:'dashboard_role=outsider'}});
+  assert.equal(forbiddenContent.status,404);
+  const preview=await f.request('/api/permission-preview','director',{method:'PUT',body:{scope:'personal'}});
+  assert.equal(preview.status,200,JSON.stringify(preview));
+  const previewOverview=await f.request('/api/task-center/overview','director');
+  check('预览不泄露管理员任务，也不允许写入',()=>{assert.equal(previewOverview.payload.tasks.length,0);assert.equal(previewOverview.payload.preview,true);});
+  assert.equal((await f.create({},'director')).status,403);
+  const stored=JSON.parse(await readFile(join(f.dataDir,'task-center.json'),'utf8'));
+  check('状态与事件持久化为 v3，专员响应不含受限字段',()=>{assert.equal(stored.schemaVersion,3);assert.equal(JSON.stringify((initial.payload)).includes('工时'),false);});
+  const maintenance=await startFixture({writesEnabled:false});
+  try {
+    assert.equal((await maintenance.request('/api/task-center/overview')).payload.capabilities.writesEnabled,false);
+    assert.equal((await maintenance.create()).status,503);
+    assert.equal((await maintenance.service({type:'delivery_receipt'})).status,503);
+    checks.push('维护模式保留读取，阻止用户与模块回执写入');
+  } finally {await maintenance.close();}
+  console.log(JSON.stringify({ok:true,scope:'LOCAL MOCK-AUTH HTTP ONLY; not production acceptance',checks},null,2));
+} finally {await f.close();}

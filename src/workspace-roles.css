@@ -1,0 +1,19 @@
+.workspace-role-list { display: grid; gap: 16px; }
+.workspace-role-card { border: 1px solid #c6dfec; border-radius: 16px; background: #fff; padding: 22px; }
+.workspace-role-card header, .workspace-role-card footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.workspace-role-card header > div { display: grid; gap: 6px; }
+.workspace-role-card header strong { font-size: 18px; }
+.workspace-role-card small, .workspace-role-card footer span { color: #56758a; font-size: 12px; }
+.workspace-role-fields { display: grid; grid-template-columns: 1fr 1fr 1.3fr; gap: 18px; margin: 20px 0; }
+.workspace-role-fields label, .workspace-role-filters label, .workspace-role-summary { display: grid; gap: 8px; font-size: 13px; }
+.workspace-role-fields select, .workspace-role-filters select { min-height: 40px; width: 100%; background: #fff; color: #10354b; border: 1px solid #b8d8e8; border-radius: 8px; padding: 8px 12px; }
+.workspace-role-summary { border-left: 3px solid #0b8fcc; padding: 2px 16px; }
+.workspace-role-card fieldset { border: 0; border-top: 1px solid #e5eef4; padding: 16px 0; margin: 0; min-width: 0; }
+.workspace-role-card legend { padding-right: 12px; font-size: 13px; font-weight: 600; }
+.workspace-role-modules { display: flex; gap: 14px 24px; flex-wrap: wrap; }
+.workspace-role-modules label { display: flex; align-items: center; gap: 7px; font-size: 13px; }
+.workspace-role-modules input { accent-color: #078bce; width: 16px; height: 16px; }
+.workspace-role-card footer { margin-top: 10px; }
+.workspace-role-filters { display: flex; gap: 18px; margin-bottom: 20px; flex-wrap: wrap; }
+.workspace-role-filters label { min-width: 180px; }
+@media (max-width: 760px) { .workspace-role-fields { grid-template-columns: 1fr; } .workspace-role-card { padding: 16px; } }

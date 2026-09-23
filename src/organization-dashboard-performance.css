@@ -1,0 +1,10 @@
+.org-dashboard-progress {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: -2px 0 14px;
+  min-height: 36px;
+  color: #527187;
+  font-size: 12px;
+}

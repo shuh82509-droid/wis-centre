@@ -1,0 +1,8 @@
+[Unit]
+Description=WIS hub allowlisted Feishu organization evidence refresh
+After=default.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/brand-marketing/fandow-apps/fd-026222/source-refresh/server-source-refresh-runner.sh organization
+TimeoutStartSec=10min
