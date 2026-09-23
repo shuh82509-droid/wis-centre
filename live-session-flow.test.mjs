@@ -13,6 +13,20 @@ const modules=['workflow-engine','live-room-management'];
 const staff=[{number:'M',name:'主管',role:'manager'},{number:'L',name:'房间主责',role:'specialist'},{number:'A',name:'主播',role:'specialist'},{number:'B',name:'助理',role:'specialist'},{number:'X',name:'无关同事',role:'specialist'}].map(p=>({...p,active:true,workflowEnabled:true,center:'直播中心',modules}));
 const access=(number='M')=>({enabled:true,canManage:number==='M',department:false,user:staff.find(p=>p.number===number),modules});
 const evidence=[{url:'https://example.com/approved',reference:'versioned-evidence',version:'v1'}];
+test('只接受四个已确认岗位别名，仍要求正式来源、唯一身份与即时核验',()=>{
+ const now=Date.parse('2026-09-23T08:00:00+08:00');
+ const people=['李凯彤','李彩红','谷子晴','邓淑环','未确认'].map((name,i)=>({name,number:'feishu-'+i,active:true,center:'直播中心',modules:[],workflowEnabled:false}));
+ const participants={verified:number=>people.some(p=>p.number===number)};
+ const raw=name=>({date:'2026-09-23',updatedAt:new Date(now).toISOString(),source:{mode:'official_live',verified:true,spreadsheetToken:'EuYqssm4WhNwAvtyybKcDdk1ned'},rooms:[{code:'wangou',name:'王鸥美肤',anchors:[['09:00','12:00',name]],assistants:[['09:00','12:00','谷子晴']]}],sourceStatus:{wangou:{found:true,revision:42,sheetId:'real-sheet'}}});
+ for(const name of ['李凯彤','李彩红','谷子晴','邓淑环'])for(const suffix of ['(金牌导购)','（金牌导购）']){
+   assert.equal(scheduleSessions(raw(name+suffix),'2026-09-23',people,now,participants)[0].anchor,people.find(p=>p.name===name).number);
+ }
+ for(const name of ['未确认(金牌导购)','李彩红(临时)','李彩红（金牌导购）其他'])assert.throws(()=>scheduleSessions(raw(name),'2026-09-23',people,now,participants),/唯一有效/);
+ assert.throws(()=>scheduleSessions(raw('李彩红(金牌导购)'),'2026-09-23',[...people,{...people[1],number:'duplicate'}],now,{verified:()=>true}),/唯一有效/);
+ assert.throws(()=>scheduleSessions(raw('李彩红(金牌导购)'),'2026-09-23',people,now,{verified:()=>false}),/唯一有效/);
+ const nonOfficial=raw('李彩红(金牌导购)');delete nonOfficial.source;nonOfficial.writebackCapability={enabled:true};
+ assert.throws(()=>scheduleSessions(nonOfficial,'2026-09-23',people,now,participants),/唯一有效/);
+});
 function fixture(t){
  const dir=mkdtempSync(join(tmpdir(),'wis-live-session-'));t.after(()=>rmSync(dir,{recursive:true,force:true}));
  let now=Date.parse('2026-09-23T08:00:00+08:00');

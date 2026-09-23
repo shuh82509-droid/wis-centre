@@ -43,5 +43,3 @@ async function openCreativeConnect(){
  source.addEventListener('change',()=>load());more.addEventListener('click',()=>load(true));await load();
  setupSubmit(f=>({source:f.get('source'),recordId:f.get('recordId'),owner:f.get('owner')||undefined,reviewer:f.get('reviewer'),manager:f.get('manager')}),(body,key)=>api('creative/watches',{body,key}),async task=>{toast('已接入创意任务，通知送达结果可在任务详情查看。');await refresh();await openTask(task.id);});
 }
-const flowRoute=location.pathname.match(/^(.*?\/)(?:l2-candidate\/)?workflow-panorama(?:\/|$)/);
-if(!flowRoute)throw Error('流程入口路径不正确，请从中枢重新进入。');

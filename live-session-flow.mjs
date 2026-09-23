@@ -7,7 +7,15 @@ export const liveStages=['备播与排班','话术与素材准备','上播准备
 export const roomLeads=Object.freeze({guanqi:{number:'FD-024035',name:'曾泳淇'},brand_selection:{number:'FD-023807',name:'梁瑜涵'},youxuan:{number:'FD-028493',name:'李爽'},wangou:{number:'FD-026339',name:'鲍敏纳'}});
 // Exact roster abbreviations confirmed by the commissioning owner on 2026-09-23.
 // This does not grant access or accept fuzzy / partial-name matches.
-const confirmedRosterNames=Object.freeze({'梦怡':'曾梦怡','佩娜':'黄佩娜'});
+const confirmedRosterNames=Object.freeze({
+  '梦怡':'曾梦怡','佩娜':'黄佩娜',
+  // These four job-label aliases were individually confirmed by the owner.
+  // Do not strip arbitrary suffixes or apply this to unverified backup sources.
+  '李凯彤(金牌导购)':'李凯彤','李凯彤（金牌导购）':'李凯彤',
+  '李彩红(金牌导购)':'李彩红','李彩红（金牌导购）':'李彩红',
+  '谷子晴(金牌导购)':'谷子晴','谷子晴（金牌导购）':'谷子晴',
+  '邓淑环(金牌导购)':'邓淑环','邓淑环（金牌导购）':'邓淑环',
+});
 const stageFor=id=>id.startsWith('W04.S2.')?0:id==='W04.S3.E1'?1:id==='W04.S3.E2'?2:id.startsWith('W04.S4.')?3:4;
 const dateAt=ms=>new Date(ms+8*3600000).toISOString().slice(0,10);
 function validDate(date){return /^20\d{2}-\d{2}-\d{2}$/.test(date)&&dateAt(Date.parse(date+'T00:00:00+08:00'))===date;}
@@ -25,7 +33,7 @@ function timeline(rows,date){
 }
 // This adapter consumes the existing dispatch response, never browser-submitted
 // people or a last-good snapshot masquerading as a current schedule.
-export function scheduleSessions(raw,date,people,now=Date.now()){
+export function scheduleSessions(raw,date,people,now=Date.now(),participants=null){
   requireFact(validDate(date)&&raw?.date===date,'班表业务日期不一致',409);
   const age=now-Date.parse(raw.updatedAt);
   requireFact(Number.isFinite(age)&&age>=-60000&&age<=15*60000,'班表读取时间过期，需刷新真实来源后派工',409);
@@ -33,8 +41,8 @@ export function scheduleSessions(raw,date,people,now=Date.now()){
   requireFact(!raw.recovery&&!raw.source?.mode?.includes('backup')&&(direct||raw.writebackCapability?.enabled===true),'当前班表仍为只读恢复来源，不能据此自动派工',409);
   const resolve=name=>{
     const fullName=direct?confirmedRosterNames[name]||name:name;
-    const matches=people.filter(p=>p.active&&p.name===fullName&&(!direct||p.center==='直播中心')&&p.workflowEnabled!==false&&p.modules?.includes('live-room-management')&&p.modules?.includes('workflow-engine'));
-    requireFact(matches.length===1,`${name||'未命名人员'} 尚无唯一有效的直播与流程身份`,409);return matches[0].number;
+    const matches=people.filter(p=>p.active&&p.name===fullName&&(!direct||p.center==='直播中心')&&((p.workflowEnabled!==false&&p.modules?.includes('live-room-management')&&p.modules?.includes('workflow-engine'))||(direct&&participants?.verified(p.number))));
+    requireFact(matches.length===1,`${name||'未命名人员'} 尚无唯一有效的直播或飞书参与人身份`,409);return matches[0].number;
   };
   const sessions=[];
   for(const room of raw.rooms||[]){
@@ -81,7 +89,7 @@ export class LiveSessionFlow {
   async preview(a,req,date){
     this.check(a,true);requireFact(validDate(date),'日期格式无效');requireFact(this.readSchedule,'正式班表读取尚未配置',503);
     const people=this.runtime.people(),raw=await this.readSchedule(req,date),issues=[...(raw.issues||[])],sessions=[];
-    for(const room of raw.rooms||[]){try{sessions.push(...scheduleSessions({...raw,rooms:[room]},date,people,this.clock()));}catch(e){issues.push({roomCode:room.code,roomName:room.name,message:e.message});}}
+    for(const room of raw.rooms||[]){try{sessions.push(...scheduleSessions({...raw,rooms:[room]},date,people,this.clock(),this.runtime.liveParticipants));}catch(e){issues.push({roomCode:room.code,roomName:room.name,message:e.message});}}
     const cancelled=this.runtime.store.read().tasks.filter(t=>t.runtime?.liveSession?.date===date&&t.runtime.state==='cancelled'&&!t.runtime.liveSession.replacedBy&&runVisible(t,a));
     return {date,stages:liveStages,issues,sessions:sessions.map(s=>({...s,anchorName:people.find(p=>p.number===s.anchor)?.name,assistantNames:s.assistants.map(number=>people.find(p=>p.number===number)?.name),roomLead:this.leads[s.roomCode],cancelledTasks:cancelled.filter(t=>t.runtime.liveSession.roomCode===s.roomCode).map(t=>({id:t.id,version:t.version,title:t.title,sessionKey:t.runtime.liveSession.key,taskUrl:this.runtime.taskUrl(t.id)}))}))};
   }
@@ -106,7 +114,7 @@ export class LiveSessionFlow {
       'W04.S2.E1':lead.number,'W04.S2.E2':manager.number,'W04.S3.E1':lead.number,
       'W04.S3.E2':lead.number,'W04.S4.E1':slot.anchor,'W04.S5.E1':manager.number,'W04.S5.E2':manager.number};
     requireFact(Object.values(bindings).every(Boolean),'请确认排班、素材、放行和复盘负责人');
-    const prepared=r.create(a,{workflow:'04',options:{anchorMode:'existing'},owner:slot.anchor,manager:manager.number,bindings,title:`${slot.roomName} ${slot.date} ${new Date(slot.startAt).toLocaleTimeString('zh-CN',{timeZone:'Asia/Shanghai',hour:'2-digit',minute:'2-digit',hour12:false})} 直播工作`,sourceKey:slot.key,sourceUrl:r.taskUrl(''),acceptance:'五环节真实办理、资料可追溯、复盘行动有结论',slaHours:24},'prepare-'+key,{prepareOnly:true,definition:{moduleOrder:[]}});
+    const prepared=r.create(a,{workflow:'04',options:{anchorMode:'existing'},owner:slot.anchor,manager:manager.number,bindings,title:`${slot.roomName} ${slot.date} ${new Date(slot.startAt).toLocaleTimeString('zh-CN',{timeZone:'Asia/Shanghai',hour:'2-digit',minute:'2-digit',hour12:false})} 直播工作`,sourceKey:slot.key,sourceUrl:r.taskUrl(''),acceptance:'五环节真实办理、资料可追溯、复盘行动有结论',slaHours:24},'prepare-'+key,{prepareOnly:true,definition:{moduleOrder:[]},liveExecution:true});
     // A live session follows this explicit role plan, not another published
     // flow's task_owner defaults or unrelated automatic cross-module routing.
     for(const n of prepared.runtime.nodes){
@@ -140,7 +148,9 @@ export class LiveSessionFlow {
       requireFact(!existing||existing.runtime.liveSession.signature===slot.signature,'此班次已有任务且来源变化，请在原任务处理，不能重复派工',409);
       if(existing){s.flowDedupe[dedupeKey]={hash,taskId:existing.id};return existing;}
       }
-      s.tasks.push(prepared);r.log(s,prepared,null,'live_session_created',a.user,'来源版本 '+slot.source.revision);r.route(s,prepared);s.flowDedupe[dedupeKey]={hash,taskId:prepared.id};return prepared;
+      s.tasks.push(prepared);const created=r.log(s,prepared,null,'live_session_created',a.user,'来源版本 '+slot.source.revision);r.route(s,prepared);
+      for(const n of prepared.runtime.nodes.filter(n=>r.liveParticipants?.canOwn(n.owner.number,n.id)))r.notify(s,prepared,n,'live_assignment',n.owner.number,created.id);
+      s.flowDedupe[dedupeKey]={hash,taskId:prepared.id};return prepared;
     });return r.get(a,task.id);
   }
   today(a){
@@ -177,7 +187,7 @@ export class LiveSessionFlow {
     const slot=task.runtime.liveSession;
     requireFact(this.readSchedule,'正式班表读取尚未配置',503);
     const raw=await this.readSchedule(req,slot.date);
-    const current=scheduleSessions({...raw,rooms:(raw.rooms||[]).filter(room=>room.code===slot.roomCode)},slot.date,this.runtime.people(),this.clock()).find(s=>s.key===slot.key);
+    const current=scheduleSessions({...raw,rooms:(raw.rooms||[]).filter(room=>room.code===slot.roomCode)},slot.date,this.runtime.people(),this.clock(),this.runtime.liveParticipants).find(s=>s.key===slot.key);
     requireFact(current?.signature===slot.signature,'班次来源已变化，请由主管核对原任务；本次未完成或重复派工',409);
   }
 }

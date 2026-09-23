@@ -23,7 +23,7 @@ export class LiveAutoDispatch {
         issues.push(...(raw.issues||[]).map(i=>({...i,date})));
         for(const room of raw.rooms||[]){
           let slots;
-          try{slots=scheduleSessions({...raw,rooms:[room]},date,r.people(),this.clock());}catch(e){issues.push({date,roomCode:room.code,roomName:room.name,message:e.message});continue;}
+          try{slots=scheduleSessions({...raw,rooms:[room]},date,r.people(),this.clock(),r.liveParticipants);}catch(e){issues.push({date,roomCode:room.code,roomName:room.name,message:e.message});continue;}
           // Reconcile existing work without changing any completion, owner or
           // evidence. A changed schedule requires explicit manager resolution.
           r.store.transaction(s=>{

@@ -26,6 +26,7 @@ import { LiveAutoDispatch } from './live-auto-dispatch.mjs';
 import { createLiveScheduleReader } from './live-schedule-reader.mjs';
 import { FlowSources } from './flow-sources.mjs';
 import { FlowFeishu } from './flow-feishu.mjs';
+import { LiveFeishuService } from './live-feishu-service.mjs';
 import { createFlowHandler } from './flow-http.mjs';
 import { FlowEvidence } from './flow-evidence.mjs';
 import { FlowAutomation } from './flow-automation.mjs';
@@ -3082,7 +3083,8 @@ const sparkLibraryHandler = createSparkLibraryHandler({ root: join(dataRoot, 'sp
   currentSession, previewFor: permissionPreviewFor, sendJson, readJson: readTaskJsonBody });
 const workflowStore = new WorkflowStore(taskCenterFile);
 const flowSources = new FlowSources();
-const flowRuntime = new FlowRuntime(workflowStore, {people:()=>flowSources.people(),canNotify:number=>flowNotifier.canQueue(number)});
+let liveFeishuService=null;
+const flowRuntime = new FlowRuntime(workflowStore, {people:()=>liveFeishuService?.people(flowSources.people())||flowSources.people(),canNotify:number=>flowNotifier.canQueue(number)});
 const flowNotifier = new FlowFeishu(workflowStore, {people:()=>flowSources.people()});
 const flowAccessFor = payload => {
   const user=taskCenterUser(payload), enabled=(payload.workspace?.is_brand_department===true||payload.permissions?.manage_permissions===true)&&!inactiveWorkflowMembers.has(user.number)&&['director','manager','specialist'].includes(user.role)&&payload.access?.allowed_modules?.includes('workflow-engine')===true;
@@ -3094,6 +3096,7 @@ const flowAutomation=new FlowAutomation(flowRuntime,flowSources);
 const liveSessions=new LiveSessionFlow(flowRuntime,{enabled:process.env.FLOW_LIVE_SESSIONS_ENABLED==='true',readSchedule:process.env.FLOW_LIVE_OFFICIAL_SOURCE==='true'?createOfficialLiveScheduleReader({appId:process.env.FEISHU_APP_ID,appSecret:process.env.FEISHU_APP_SECRET}):process.env.HUB_INTEGRATED_MODE==='1'?createLiveScheduleReader({publicUrl:process.env.FLOW_PUBLIC_URL}):null});
 const liveAutoDispatch=new LiveAutoDispatch(liveSessions,{enabled:process.env.FLOW_LIVE_AUTO_DISPATCH==='true'&&process.env.FLOW_LIVE_OFFICIAL_SOURCE==='true'});
 const flowExecution=workflowExecutionPolicy();
+liveFeishuService=new LiveFeishuService({runtime:flowRuntime,notifier:flowNotifier,liveSessions});
 const flowHandler=createFlowHandler({runtime:flowRuntime,creative:productionSources?.creative,creativeStatus:()=>productionSources?.status()||{},localBusinessStatus:()=>productionSources?.business.status()||{},liveSessions,automation:flowAutomation,blueprints:flowBlueprints,sources:flowSources,notifier:flowNotifier,evidenceReader:new FlowEvidence({sources:flowSources,readCloud:callAuthority}),delivery:new FlowDelivery({runtime:flowRuntime,readCloud:callAuthority,root:join(dataRoot,'flow-deliveries')}),currentSession,accessFor:flowAccessFor,previewFor:permissionPreviewFor,readJson:readTaskJsonBody,sendJson,writesEnabled:flowExecution.writesEnabled,writeAccounts:flowExecution.writeAccounts});
 const shutdown=createGracefulShutdown();
 const sourceScheduler=startSourceScheduler({dataRoot,script:fileURLToPath(new URL('./server-source-refresh.mjs',import.meta.url)),enabled:process.env.SOURCE_SCHEDULER_ENABLED==='true'});
@@ -3107,6 +3110,8 @@ const flowTickTimer=setInterval(()=>{if(flowTickBusy||shutdown.draining)return;f
 // Keep Feishu source latency isolated from existing workflow notifications.
 const liveDispatchTimer=setInterval(()=>{if(!shutdown.draining&&flowExecution.backgroundEnabled)void shutdown.trackBackground('live-auto-dispatch',()=>liveAutoDispatch.tick()).catch(()=>console.error('Live dispatch pending; existing work retained'));},30000);liveDispatchTimer.unref();
 shutdown.onStop(()=>clearInterval(liveDispatchTimer));
+const liveCardTimer=setInterval(()=>{if(!shutdown.draining)void shutdown.trackBackground('live-feishu-card-receipts',()=>flowExecution.backgroundEnabled?liveFeishuService.tick():liveFeishuService.refreshIdentities()).catch(()=>console.error('Live Feishu verification pending; no broad access granted'));},2000);liveCardTimer.unref();
+shutdown.onStop(()=>{clearInterval(liveCardTimer);liveFeishuService.stop();});
 shutdown.onStop(()=>{clearInterval(flowSourceTimer);clearInterval(flowTickTimer);});
 const workflowEngine = new TaskWorkflow(workflowStore, { resolveAssignees: taskCenterResolveAssignees, saveVideo: taskCenterSaveVideo });
 const workflowAssistant = new WorkflowAssistant(workflowStore, { provider: configuredProvider(), model: process.env.WORKFLOW_AI_MODEL || 'not-configured' });
