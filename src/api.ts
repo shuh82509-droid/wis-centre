@@ -34,6 +34,17 @@ export function isTransientApiError(error: unknown) {
   return !(error instanceof ApiError) || transientStatuses.has(error.status);
 }
 
+function isHubSession(value: unknown): value is HubSession {
+  if (!value || typeof value !== "object") return false;
+  const session = value as Record<string, unknown>;
+  if (!session.user || typeof session.user !== "object") return false;
+  if (!session.permissions || typeof session.permissions !== "object") return false;
+  if (!session.workspace || typeof session.workspace !== "object") return false;
+  if (!session.access || typeof session.access !== "object") return false;
+  const access = session.access as Record<string, unknown>;
+  return Array.isArray(access.allowed_modules) && Array.isArray(access.modules);
+}
+
 async function requestWithRetry<T>(path: string, options?: RequestInit): Promise<T> {
   const delays = [300, 900, 1_800];
   for (let attempt = 0; ; attempt += 1) {
@@ -98,7 +109,11 @@ export const api = {
     'api/permissions/organization-entry', {method: 'PUT', body: JSON.stringify({identifiers, enabled, version})},
     'api/permission-preview', 'api/organization-dashboard',
   ),
-  session: () => requestWithRetry<HubSession>("api/session"),
+  session: async () => {
+    const value = await requestWithRetry<unknown>("api/session");
+    if (!isHubSession(value)) throw new ApiError("登录态响应异常，请刷新或重试。", 502, value);
+    return value;
+  },
   workspaceSummary: () => requestWithRetry<WorkspaceHomeSummary>("api/workspace-home/summary"),
   taskCenter: () => requestWithRetry<TaskCenterOverview>("api/task-center/overview"),
   loginGrants: (q = "") => cachedGet<{ items: LoginGrant[]; total: number }>(`api/permissions/login?q=${encodeURIComponent(q)}`, 15_000),

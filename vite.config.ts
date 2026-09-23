@@ -10,7 +10,6 @@ export default defineConfig({
       output: {
         manualChunks(id) {
           if (id.includes("node_modules/react") || id.includes("node_modules/scheduler")) return "vendor-react";
-          if (id.includes("node_modules/@fluentui/react-icons")) return "vendor-icons";
           if (id.includes("node_modules/@fluentui")) return "vendor-fluent";
           return undefined;
         },
