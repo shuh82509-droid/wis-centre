@@ -1,4 +1,5 @@
 import test from 'node:test';import assert from 'node:assert/strict';import vm from 'node:vm';import {readFileSync} from 'node:fs';
+import {permissionHelpers} from './permission-test-helpers.mjs';
 const app=readFileSync(new URL('app.js',import.meta.url),'utf8');
 const logic=app.slice(app.indexOf('function canStartDownstreamNow('),app.indexOf('\nasync function openWatch('));
 const existing=app.slice(app.indexOf('async function openExistingHandoff('),app.indexOf('\nfunction showModal('));
@@ -19,8 +20,18 @@ test('旧入口原文和任务字段不改，只增加现行入口说明；新�
 test('发布提示准确区分顺序未开启、顺序开启、独立条件分支',async()=>{
  const text=readFileSync(new URL('studio.js',import.meta.url),'utf8'),save=text.slice(text.indexOf('async function studioSave('),text.indexOf("document.addEventListener('input'"));
  for(const [defaultRoute,branches,expected]of [[false,[],/自动顺序交接未开启/],[true,[],/按此顺序自动交接/],[false,[{enabled:true}],/条件分支继续生效/]]){
-  let message;const studio={saving:false,draft:{version:1},requestKey:'fixture-key'};const c=vm.createContext({studio,state:{view:'studio'},api:async route=>route==='blueprints/publish'?{draft:{version:2},published:{defaultRoute,branches}}:route==='blueprints'?{revisions:[]}: {},toast:x=>message=x,render:()=>{},persistStudio:()=>{}});vm.runInContext(save,c);await c.studioSave('publish');assert.match(message,expected);
+  let message;const studio={saving:false,draft:{version:1},requestKey:'fixture-key'};const c=vm.createContext({studio,state:{view:'studio',overview:{access:{canManage:true}}},api:async route=>route==='blueprints/publish'?{draft:{version:2},published:{defaultRoute,branches}}:route==='blueprints'?{revisions:[]}: {},toast:x=>message=x,render:()=>{},persistStudio:()=>{}});vm.runInContext(permissionHelpers+'\n'+save,c);await c.studioSave('publish');assert.match(message,expected);
  }
+});
+
+test('编排预览迟到时若授权已撤回，不重新显示旧配置结果',async()=>{
+ const text=readFileSync(new URL('studio.js',import.meta.url),'utf8'),save=text.slice(text.indexOf('async function studioSave('),text.indexOf("document.addEventListener('input'"));
+ let resolve,rendered=0;
+ const studio={saving:false,draft:{version:1},preview:null},state={view:'studio',overview:{access:{number:'ISOLATED-E',canManage:false,canConfigure:true,configurationOnly:true}}};
+ const c=vm.createContext({state,studio,api:()=>new Promise(r=>resolve=r),render:()=>rendered++,toast(){}});
+ vm.runInContext(permissionHelpers+'\n'+save,c);const pending=c.studioSave('preview');
+ state.overview.access={number:'ISOLATED-E',canManage:false,canConfigure:false};resolve({privatePreview:'old'});await pending;
+ assert.equal(studio.preview,null);assert.equal(rendered,0);
 });
 
 function searchFixture(){

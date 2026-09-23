@@ -1,3 +1,4 @@
+import {ProductionSources} from './flow-production-sources.mjs';
 import { createReadStream, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
@@ -3080,17 +3081,18 @@ const flowAccessFor = payload => {
   const user=taskCenterUser(payload), enabled=(payload.workspace?.is_brand_department===true||payload.permissions?.manage_permissions===true)&&!inactiveWorkflowMembers.has(user.number)&&['director','manager','specialist'].includes(user.role)&&payload.access?.allowed_modules?.includes('workflow-engine')===true;
   return configurationAccess({user,enabled,canManage:enabled&&['director','manager'].includes(user.role),department:enabled&&user.role==='director'&&payload.workspace?.dashboard_scope==='department',modules:payload.access?.allowed_modules||[]},readConfigurationGrants(join(dataRoot,'flow-configuration-grants.json')),{inactive:inactiveWorkflowMembers.has(user.number)});
 };
+const productionSources=process.env.FLOW_BUSINESS_SNAPSHOT?new ProductionSources(flowRuntime,flowSources,{file:process.env.FLOW_BUSINESS_SNAPSHOT,externalNumbers:(process.env.FLOW_EXTERNAL_COLLABORATOR_NUMBERS||'').split(',').filter(Boolean)}):null;
 const flowBlueprints=new FlowBlueprints(flowRuntime);flowRuntime.blueprints=flowBlueprints;
 const flowAutomation=new FlowAutomation(flowRuntime,flowSources);
 const flowExecution=workflowExecutionPolicy();
-const flowHandler=createFlowHandler({runtime:flowRuntime,automation:flowAutomation,blueprints:flowBlueprints,sources:flowSources,notifier:flowNotifier,evidenceReader:new FlowEvidence({sources:flowSources,readCloud:callAuthority}),delivery:new FlowDelivery({runtime:flowRuntime,readCloud:callAuthority,root:join(dataRoot,'flow-deliveries')}),currentSession,accessFor:flowAccessFor,previewFor:permissionPreviewFor,readJson:readTaskJsonBody,sendJson,writesEnabled:flowExecution.writesEnabled,writeAccounts:flowExecution.writeAccounts});
+const flowHandler=createFlowHandler({runtime:flowRuntime,creative:productionSources?.creative,creativeStatus:()=>productionSources?.status()||{},localBusinessStatus:()=>productionSources?.business.status()||{},automation:flowAutomation,blueprints:flowBlueprints,sources:flowSources,notifier:flowNotifier,evidenceReader:new FlowEvidence({sources:flowSources,readCloud:callAuthority}),delivery:new FlowDelivery({runtime:flowRuntime,readCloud:callAuthority,root:join(dataRoot,'flow-deliveries')}),currentSession,accessFor:flowAccessFor,previewFor:permissionPreviewFor,readJson:readTaskJsonBody,sendJson,writesEnabled:flowExecution.writesEnabled,writeAccounts:flowExecution.writeAccounts});
 const shutdown=createGracefulShutdown();
 const refreshFlowSources=()=>shutdown.trackBackground('flow-source-refresh',async()=>{await flowSources.refresh();await waitForWorkerExit(flowSources.worker);}).catch(()=>console.error('Workflow source refresh pending; previous records retained'));
 if (process.env.FLOW_SOURCE_REFRESH_ENABLED !== 'false') void refreshFlowSources();
 const flowSourceTimer=process.env.FLOW_SOURCE_REFRESH_ENABLED === 'false' ? null : setInterval(()=>void refreshFlowSources(),30000);
 flowSourceTimer?.unref();
 let flowTickBusy=false;
-const flowTickTimer=setInterval(()=>{if(flowTickBusy||shutdown.draining)return;flowTickBusy=true;void shutdown.trackBackground('flow-tick-and-notification-receipts',async()=>{try{if(flowExecution.backgroundEnabled){flowAutomation.reconcile();flowRuntime.tick();await flowNotifier.flush();}}catch{console.error('Workflow background pending; persisted events retained');}finally{flowTickBusy=false;}});},5000);flowTickTimer.unref();
+const flowTickTimer=setInterval(()=>{if(flowTickBusy||shutdown.draining)return;flowTickBusy=true;void shutdown.trackBackground('flow-tick-and-notification-receipts',async()=>{try{if(flowExecution.backgroundEnabled){await productionSources?.sync();flowAutomation.reconcile();flowRuntime.tick();await flowNotifier.flush();}}catch{console.error('Workflow background pending; persisted events retained');}finally{flowTickBusy=false;}});},5000);flowTickTimer.unref();
 shutdown.onStop(()=>{clearInterval(flowSourceTimer);clearInterval(flowTickTimer);});
 const workflowEngine = new TaskWorkflow(workflowStore, { resolveAssignees: taskCenterResolveAssignees, saveVideo: taskCenterSaveVideo });
 const workflowAssistant = new WorkflowAssistant(workflowStore, { provider: configuredProvider(), model: process.env.WORKFLOW_AI_MODEL || 'not-configured' });

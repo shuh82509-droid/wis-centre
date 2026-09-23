@@ -2,10 +2,10 @@ import {flows,stages,stageEdges,edges} from './flow-definitions.mjs';
 import {requireFact} from './workflow-store.mjs';
 import {evidenceKinds} from './flow-evidence.mjs';
 export const catalogVersion='20260908-l2.1';
-export const modules={'00':'creative-hub','01':'ai-first-creation','02':'material-workbench','03':'cloud-manager','04':'live-room-management','05':'data-dashboard','06':null};
+export const modules={'00':'creative-hub','07':'creative-hub','01':'ai-first-creation','02':'material-workbench','03':'cloud-manager','04':'live-room-management','05':'data-dashboard','06':null};
 export const managementNodes=new Set(['W00.S1.E2','W00.S2.E2','W00.S4.E1','W04.S2.E2','W04.S5.E1','W04.S5.E2','W05.S4.E2','W05.S5.E1','W06.S1.E1','W06.S1.E2','W06.S2.E4','W06.S3.E2','W06.S3.E4','W06.S5.E2','W06.S6.E1','W06.S6.E3','W06.S6.E4','W06.S7.E1']);
 export const catalog={version:catalogVersion,standardUrl:'https://jqx28l0j4lx.feishu.cn/docx/H5IUdwVApohZMexqxz5cRHADnYf',
- flows:flows.map(({id,name,short,trigger,goal,finish,metric,relation,owner})=>({id,name,short,trigger,goal,finish,metric,relation,owner,module:modules[id],target:'L2 流程驱动'})),
+ flows:flows.map(({id,name,short,trigger,goal,finish,metric,relation,owner,sourceManaged})=>({id,name,short,trigger,goal,finish,metric,relation,owner,sourceManaged:!!sourceManaged,module:modules[id],target:'L2 流程驱动'})),
  stages:stages.map(s=>({id:s.id,flow:s.flow,title:s.title,owner:s.owner,output:s.output,executionMode:s.executionMode||'sequential',trigger:s.trigger||'',
  steps:s.steps.map(x=>({id:x.id,title:x.title,type:x.type,owner:x.owner,entry:x.entry,inputs:x.inputs,outputs:x.outputs,done:x.done,fields:x.fields,route:x.route,recovery:x.recovery,optional:!!x.optional,evidenceKind:evidenceKinds[x.id]||'human_attested'})),nodeRoutes:s.nodeRoutes||null})),stageEdges,edges};
 export function flowAllowed(access,id){

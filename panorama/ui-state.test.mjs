@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
+import {permissionHelpers} from './permission-test-helpers.mjs';
 
 const source=readFileSync(new URL('app.js',import.meta.url),'utf8');
 const detailsHelper=source.slice(source.indexOf('const disclosureState='),source.indexOf('function toast('));
@@ -49,11 +50,11 @@ test('同一任务暂时收起节点后，重新展开仍记住该节点历史�
 test('先前任务的延迟响应不会覆盖后来打开的任务',async()=>{
  const openTask=source.split('\n').find(line=>line.startsWith('async function openTask('));
  let resolveA;const slowA=new Promise(resolve=>{resolveA=resolve;});
- const context=vm.createContext({state:{task:null,stage:null,openNodes:new Set()},document:{activeElement:{}},
+ const context=vm.createContext({state:{task:null,stage:null,openNodes:new Set(),overview:{access:{canManage:false}}},document:{activeElement:{}},
   api:path=>path==='runs/A'?slowA:Promise.resolve({id:'B',runtime:{nodes:[]}}),
   openDrawer(){},drawerHeader(){return '';},renderTask(){},
   history:{replaceState(){}},location:{pathname:'/workflow/'},encodeURIComponent,esc:String});
- vm.runInContext('let taskRequest=0,lastFocus;\n'+openTask,context);
+ vm.runInContext('let taskRequest=0,lastFocus;\n'+permissionHelpers+'\n'+openTask,context);
  const first=context.openTask('A');await context.openTask('B');
  resolveA({id:'A',runtime:{nodes:[]}});await first;
  assert.equal(context.state.task.id,'B');

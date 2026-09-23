@@ -8,7 +8,7 @@ const id=p=>p+'_'+randomUUID().replaceAll('-','');
 const actorSystem={number:'SYSTEM',name:'流程引擎'};
 const closed=new Set(['completed','cancelled']);
 export const immediateHandoffNodes=Object.freeze({'00':'W00.S4.E1','05':'W05.S5.E1'});
-export function runVisible(t,a){return !!(t.runtime&&a.enabled&&!a.configurationOnly&&flowAllowed(a,t.workflow)&&(t.workflow==='06'?t.runtime.participants.includes(a.user.number):a.department||t.center===a.user.center&&(a.canManage||t.runtime.participants.includes(a.user.number))));}
+export function runVisible(t,a){return !!(t.runtime&&a.enabled&&!a.configurationOnly&&flowAllowed(a,t.workflow)&&(t.workflow==='06'?t.runtime.participants.includes(a.user.number):a.department||(t.runtime.creative?.automatic||t.runtime.creative?.local||t.runtime.localBusiness)&&t.runtime.participants.includes(a.user.number)||t.center===a.user.center&&(a.canManage||t.runtime.participants.includes(a.user.number))));}
 // A relationship is informational: it never grants task, attachment or action
 // permission. Only reciprocal links persisted by the dispatcher are displayed.
 function relationIndex(tasks){const byId=new Map(tasks.map(t=>[t.id,t])),children=new Map();for(const child of tasks){const parent=byId.get(child.runtime?.parentTaskId);if(!parent?.runtime||parent.id===child.id||parent.workflow==='06'||child.workflow==='06')continue;const dispatched=parent.runtime.handoff?.state==='dispatched'&&parent.runtime.handoff.taskId===child.id,branched=Object.values(parent.runtime.blueprintTriggers||{}).some(v=>v.taskId===child.id);if(!dispatched&&!branched)continue;if(!children.has(parent.id))children.set(parent.id,[]);children.get(parent.id).push(child);}return {byId,children};}
@@ -22,12 +22,12 @@ export class FlowRuntime{
  person(number,a){const p=this.people().find(p=>p.number===number&&p.active);requireFact(p&& (a.department||p.center===a.user.center),'负责人不在当前授权的在职人员范围',403);return {number:p.number,name:p.name,center:p.center};}
  validateOwner(n,number,nodes){const person=this.people().find(p=>p.number===number),flow=n.id.match(/^W(\d{2})\./)?.[1];if(flow&&Array.isArray(person?.modules))requireFact(flowAllowed({enabled:person.active,modules:person.modules},flow),(person.name||number)+' 尚未开放此业务模块，请选择已有权限的同事或先完成授权',403);if(n.managerRequired)requireFact(['manager','director'].includes(person?.role),'此决定节点须由具备原业务授权的主管或总监办理',403);if(['W06.S6.E3','W06.S6.E4'].includes(n.id)){const other=nodes.find(x=>x.id===(n.id==='W06.S6.E3'?'W06.S6.E4':'W06.S6.E3'));requireFact(!other||other.owner.number!==number,'绩效复核负责人须与原评议负责人分开',403);}}
  log(s,t,n,action,actor=actorSystem,note='',evidence=null){const e={id:id('flowevt'),taskId:t.id,nodeId:n?.id||null,attempt:n?.attempt||null,action,actor:{number:actor.number,name:actor.name},at:this.iso(),note:text(note,1500),evidence};s.flowEvents.push(e);t.updatedAt=e.at;return e;}
- notify(s,t,n,kind,recipient,eventId){if(!recipient)return;const key=[t.id,n?.id||'task',n?.attempt||0,kind,eventId,recipient].join(':');if(s.flowNotifications.some(x=>x.key===key))return;s.flowNotifications.push({id:id('notice'),key,taskId:t.id,nodeId:n?.id||null,attempt:n?.attempt||0,kind,recipient,state:'ready',attempts:0,nextAt:this.clock(),createdAt:this.iso(),messageId:null,...(kind==='source_attention'?{reason:t.runtime.automation?.issue}: {})});}
+ notify(s,t,n,kind,recipient,eventId){if(!recipient)return;const source=t.runtime.localBusiness?.source||t.runtime.creative?.source;if(this.serviceNotificationOwners?.has(source)&&['ready','returned','completed'].includes(kind)){t.runtime.serviceNotifications=true;return;}const key=[t.id,n?.id||'task',n?.attempt||0,kind,eventId,recipient].join(':');if(s.flowNotifications.some(x=>x.key===key))return;s.flowNotifications.push({id:id('notice'),key,taskId:t.id,nodeId:n?.id||null,attempt:n?.attempt||0,kind,recipient,state:'ready',attempts:0,nextAt:this.clock(),createdAt:this.iso(),messageId:null,...(kind==='source_attention'?{reason:t.runtime.automation?.issue}: {})});}
  route(s,t){if(t.runtime.state!=='running')return;for(const n of t.runtime.nodes){if(n.state!=='pending'||!n.dependencies.every(k=>t.runtime.nodes.find(x=>x.id===k)?.state==='completed'))continue;n.state='ready';n.startedAt=this.iso();n.dueAt=new Date(this.clock()+n.slaHours*3600000).toISOString();const e=this.log(s,t,n,'node_ready');this.notify(s,t,n,'ready',n.owner.number,e.id);}
   if(t.runtime.nodes.every(n=>n.state==='completed')){t.runtime.state='completed';t.status='completed';t.runtime.completedAt=this.iso();const e=this.log(s,t,null,'flow_completed');this.notify(s,t,null,'completed',t.runtime.manager.number,e.id);this.dispatchHandoff(s,t);}
  }
- create(a,b,key,{prepareOnly=false,definition=null}={}){requireFact(a.canManage&&flowAllowed(a,b.workflow),'当前账号不能发起此流程',403);requireFact(typeof key==='string'&&key.length>=8&&key.length<=128,'缺少防重复提交编号');
-  requireFact(prepareOnly||!(/^(auto|handoff|blueprint):/.test(String(b.sourceKey||''))),'此来源编号前缀由流程引擎管理，请使用原业务编号');
+ create(a,b,key,{prepareOnly=false,definition=null}={}){requireFact(b.workflow!=='07','请在创意工作台创建任务，系统会自动同步到流程引擎',409);requireFact(a.canManage&&flowAllowed(a,b.workflow),'当前账号不能发起此流程',403);requireFact(typeof key==='string'&&key.length>=8&&key.length<=128,'缺少防重复提交编号');
+  requireFact(prepareOnly||!(/^(auto|handoff|blueprint|creative|source):/.test(String(b.sourceKey||''))),'此来源编号前缀由流程引擎管理，请使用原业务编号');
   const h=fingerprint(b),k=a.user.number+':'+key;const old=this.store.read().flowDedupe?.[k];if(old){requireFact(old.hash===h,'重复提交内容不一致',409);return this.get(a,old.taskId);}
   b=this.blueprints?.resolveForCreate(a,b,definition)||{...b,_blueprint:null};
   const nodes=executionGraph(b),owner=this.person(b.owner,a),manager=this.person(b.manager||a.user.number,a);const people=this.people();
@@ -55,7 +55,7 @@ export class FlowRuntime{
  configureHandoff(a,taskId,b,key){
   requireFact(typeof key==='string'&&key.length>=8&&key.length<=128,'缺少防重复操作编号');
   const dispatchMode=b.dispatchMode===undefined?'after_completion':b.dispatchMode;requireFact(['after_completion','now'].includes(dispatchMode),'交接时机无效');
-  const priorTask=this.get(a,taskId);requireFact(a.canManage&&(a.department||priorTask.center===a.user.center),'需要本流程管理权限',403);
+  const priorTask=this.get(a,taskId);requireFact(!priorTask.runtime.localBusiness,'来源业务任务在原系统办理',409);requireFact(!priorTask.runtime.creative,'创意同步任务的交接需在来源系统确认',409);requireFact(a.canManage&&(a.department||priorTask.center===a.user.center),'需要本流程管理权限',403);
   const hash=fingerprint(b),dedupeKey=[a.user.number,taskId,'handoff',key].join(':');
   const existing=this.store.read().flowDedupe?.[dedupeKey];if(existing){requireFact(existing.hash===hash,'重复操作内容不一致',409);return priorTask;}
   requireFact(priorTask.runtime.state!=='cancelled','已终止流程不能交接',409);
@@ -83,7 +83,7 @@ export class FlowRuntime{
    this.assertImmediateHandoff(t);this.assertHandoffDirection(t,child.workflow);
    requireFact(child.workflow===b.workflow&&child.workflow!=='06'&&t.id!==child.id,'现有任务与本次交接方向不一致',409);
    requireFact(child.version===b.existingTaskVersion,'现有任务已更新，请重新核对原任务后关联',409);
-   requireFact(['running','paused'].includes(child.runtime.state)&&!child.runtime.automation,'只能关联仍在办理的人工业务任务',409);
+   requireFact(['running','paused'].includes(child.runtime.state)&&!child.runtime.automation&&!child.runtime.creative,'只能关联仍在办理的人工业务任务',409);
    requireFact(!t.runtime.handoff||t.runtime.handoff.state!=='dispatched','已经生成或关联下游，请在原下游任务办理',409);
    requireFact(!child.runtime.parentTaskId,'现有任务已有上游，不能重接或抢占原关系',409);
    const seen=new Set([t.id]);let parent=t;
@@ -121,7 +121,7 @@ export class FlowRuntime{
   return {...result,relations,flowEvents:taskEvents(s.flowEvents||[],t,a,relations),notifications:(s.flowNotifications||[]).filter(n=>n.taskId===taskId).map(({id,nodeId,kind,recipient,state,messageId,createdAt,sentAt,error,attempts})=>({id,nodeId,kind,recipient,state,messageId,createdAt,sentAt,error,attempts}))};}
  command(a,taskId,action,b,key,{verifiedEvidence=null}={}){requireFact(typeof key==='string'&&key.length>=8&&key.length<=128,'缺少防重复操作编号');const h=fingerprint(b),k=[a.user.number,taskId,action,key].join(':');
   this.store.transaction(s=>{this.ensure(s);const t=s.tasks.find(t=>t.id===taskId&&runVisible(t,a));requireFact(t,'流程不存在或没有权限',404);const prior=s.flowDedupe[k];if(prior){requireFact(prior.hash===h,'重复操作内容不一致',409);return t;}
-   requireFact(b.expectedVersion===t.version,'任务已更新，请刷新后继续',409);requireFact(!t.runtime.automation,'此任务由二创生产记录自动推进；请到二创工作台处理原任务',409);requireFact(!closed.has(t.runtime.state),'流程已经结束',409);
+   requireFact(b.expectedVersion===t.version,'任务已更新，请刷新后继续',409);requireFact(!t.runtime.localBusiness,'此任务由来源业务来源同步，请在原工作台办理',409);requireFact(!t.runtime.creative,'此任务由创意来源同步，请在原创意工作台办理',409);requireFact(!t.runtime.automation,'此任务由二创生产记录自动推进；请到二创工作台处理原任务',409);requireFact(!closed.has(t.runtime.state),'流程已经结束',409);
    const manage=a.canManage&&(a.department||t.center===a.user.center),n=t.runtime.nodes.find(n=>n.id===b.nodeId);
    if(['pause','resume','cancel'].includes(action)){
     requireFact(manage,'需要本流程管理权限',403);requireFact(text(b.note),'请记录操作原因');

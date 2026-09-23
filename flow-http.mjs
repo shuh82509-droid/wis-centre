@@ -3,7 +3,7 @@ import {WorkflowError,requireFact} from './workflow-store.mjs';
 import {executionGraph,graphDetails,resolvedCatalog} from './flow-model.mjs';
 import {createReadStream} from 'node:fs';
 import {canConfigure,configurationDepartment,configurationEndpoint} from './flow-configuration-access.mjs';
-export function createFlowHandler({runtime,sources,notifier,automation,blueprints,evidenceReader,delivery,currentSession,accessFor,previewFor,readJson,sendJson,writesEnabled=true,writeAccounts=null}){
+export function createFlowHandler({runtime,sources,notifier,automation,creative,creativeStatus,localBusinessStatus,blueprints,evidenceReader,delivery,currentSession,accessFor,previewFor,readJson,sendJson,writesEnabled=true,writeAccounts=null}){
  return async(req,res,url)=>{if(!url.pathname.startsWith('/api/flows/'))return false;try{
   const session=await currentSession(req);if(session.status!==200){sendJson(res,session.status,session.payload);return true;}const a=accessFor(session.payload);requireFact(a.enabled,'当前身份未开放品牌营销部工作流',403);requireFact(!previewFor(req,session.payload)?.active,'请退出权限预览后使用真实工作流',403);
   const path=url.pathname.slice('/api/flows/'.length);
@@ -14,8 +14,20 @@ export function createFlowHandler({runtime,sources,notifier,automation,blueprint
   const fileMatch=path.match(/^runs\/(task_[a-z0-9]+)\/attachments\/(attachment_[a-f0-9]{32})\/content$/);
   if(req.method!=='GET'){requireFact(writesEnabled||['preview','blueprints/nodes','blueprints/preview'].includes(path),'流程维护中，已有资料已保留',503);requireFact(req.headers['x-flow-request']==='1'&&String(req.headers['content-type']||'').startsWith(fileMatch&&req.method==='PUT'?'application/octet-stream':'application/json'),'请从中枢页面提交操作',403);requireFact(req.headers['sec-fetch-site']!=='cross-site','不接受跨站请求',403);if(req.headers.origin)requireFact(new URL(req.headers.origin).host===req.headers.host,'不接受跨站请求',403);}
   if(req.method==='GET'&&path==='products'){requireFact(delivery,'交付服务待接入',503);sendJson(res,200,await delivery.products(req));return true;}
+  if(path.startsWith('creative/')){
+   requireFact(creative,'创意来源同步服务尚未连接',503);creative.assertAccess(a);
+   if(req.method==='GET'&&path==='creative/status')sendJson(res,200,{sources:creativeStatus?.()||{},watches:creative.watches(a)});
+   else if(req.method==='GET'&&path==='creative/records'){
+    const data=await creative.candidates(a,req,url.searchParams.get('source'),[],{cursor:url.searchParams.get('cursor')});
+    sendJson(res,200,{items:data.records.map(d=>({id:d.id,title:d.title,status:d.status,product:d.product})),limit:data.limit,nextCursor:data.nextCursor||null,historyAvailable:data.historyAvailable});
+   }
+   else if(req.method==='POST'&&path==='creative/watches')sendJson(res,201,await creative.configure(a,req,await readJson(req,65536),req.headers['idempotency-key']));
+   else if(req.method==='POST'&&path==='creative/sync')sendJson(res,200,{items:await creative.sync(a,req)});
+   else throw new WorkflowError(404,'创意来源接口不存在');
+   return true;
+  }
   const taskSources=path.match(/^runs\/(task_[a-z0-9]+)\/sources$/);
-  if(req.method==='GET'&&taskSources){const t=runtime.get(a,taskSources[1]),node=t.runtime.nodes.find(n=>n.id===url.searchParams.get('nodeId'));requireFact(node,'请选择本任务的办理节点',404);requireFact(t.runtime.state==='running'&&!t.runtime.automation&&node.state==='ready','节点尚未到达、已完成或已暂停，请刷新原任务',409);requireFact(a.canManage||node.owner.number===a.user.number,'只有当前主责或流程管理人可以读取交付候选',403);requireFact(['remix_output','cloud_return','cloud_review'].includes(node.evidenceKind)&&node.id.startsWith('W02.'),'此节点不使用二创成片候选',403);runtime.validateOwner(node,a.user.number,t.runtime.nodes);sendJson(res,200,sources.viewTask(a,t));return true;}
+  if(req.method==='GET'&&taskSources){const t=runtime.get(a,taskSources[1]),node=t.runtime.nodes.find(n=>n.id===url.searchParams.get('nodeId'));requireFact(node,'请选择本任务的办理节点',404);requireFact(t.runtime.state==='running'&&!t.runtime.automation&&node.state==='ready','节点尚未到达、已完成或已暂停，请刷新原任务',409);requireFact(a.canManage||node.owner.number===a.user.number,'只有当前主责或流程管理人可以读取交付候选',403);requireFact(['remix_output','cloud_return','cloud_review'].includes(node.evidenceKind)&&node.id.startsWith('W02.'),'此节点不使用二创成片候选',403);runtime.validateOwner(node,a.user.number,t.runtime.nodes);sendJson(res,200,await sources.viewTask(a,t,req));return true;}
   const deliveryMatch=path.match(/^runs\/(task_[a-z0-9]+)\/(delivery-options|attachments|cloud-assets(?:\/resolve)?)$/);
   if(deliveryMatch){requireFact(delivery,'交付服务待接入',503);const taskId=deliveryMatch[1],operation=deliveryMatch[2];
     if(req.method==='GET'&&operation==='delivery-options')sendJson(res,200,await delivery.options(req,a,taskId,url.searchParams.get('nodeId')));
@@ -35,7 +47,7 @@ export function createFlowHandler({runtime,sources,notifier,automation,blueprint
   if(req.method==='POST'&&['blueprints/preview','blueprints/save','blueprints/publish'].includes(path)){const b=await readJson(req,262144);sendJson(res,200,path.endsWith('/preview')?blueprints.preview(a,b):blueprints.save(a,b,req.headers['idempotency-key'],{publish:path.endsWith('/publish')}));return true;}
   if(req.method==='GET'&&path==='automation/watches'){sendJson(res,200,{items:automation?.view(a)||[]});return true;}
   if(req.method==='POST'&&path==='automation/watches'){requireFact(automation,'自动跟进服务尚未连接',503);sendJson(res,200,automation.configure(a,await readJson(req,65536),req.headers['idempotency-key']));return true;}
-  if(req.method==='GET'&&path==='catalog'){const data=resolvedCatalog(a,blueprints?.active(a));if(a.configurationOnly){data.flows=data.flows.filter(f=>f.id!=='06');data.stages=data.stages.filter(s=>s.flow!=='06');}sendJson(res,200,data);return true;}
+  if(req.method==='GET'&&path==='catalog'){const data=resolvedCatalog(a,blueprints?.active(a));for(const [source,c] of Object.entries(localBusinessStatus?.()||{})){const f=data.flows.find(f=>f.id===(source==='remix'?'02':'03'));if(f){f.sourceUrl=c.url;f.localConnection=c;}}const creativeFlow=data.flows.find(f=>f.id==='07');if(creativeFlow&&creativeStatus?.().idea?.url)creativeFlow.sourceUrl=creativeStatus().idea.url;if(a.configurationOnly){data.flows=data.flows.filter(f=>f.id!=='06');data.stages=data.stages.filter(s=>s.flow!=='06');}sendJson(res,200,data);return true;}
   if(req.method==='GET'&&path==='overview'){
    if(a.configurationOnly){const active=blueprints?.active(a);sendJson(res,200,{
     generatedAt:new Date().toISOString(),capabilities:{writesEnabled:!!writesEnabled},access:{...a.user,canManage:false,canConfigure:true,

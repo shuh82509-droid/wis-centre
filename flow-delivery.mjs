@@ -62,7 +62,7 @@ export class FlowDelivery {
   task(access,taskId,nodeId,{act=false}={}) {
     const task=this.runtime.get(access,taskId),node=task.runtime.nodes.find(n=>n.id===nodeId);
     requireFact(node,'办理节点不存在',404);
-    if(act){requireFact(!task.runtime.automation,'请在二创工作台处理原自动任务',409);requireFact(task.runtime.state==='running'&&node.state==='ready','节点尚未到达、已完成或已暂停，请刷新原任务',409);requireFact(access.canManage||node.owner.number===access.user.number,'只有当前主责或流程管理人可以交付',403);this.runtime.validateOwner(node,access.user.number,task.runtime.nodes);}
+    if(act){requireFact(!task.runtime.creative,'请在原创意工作台提交和审核',409);requireFact(!task.runtime.automation,'请在二创工作台处理原自动任务',409);requireFact(task.runtime.state==='running'&&node.state==='ready','节点尚未到达、已完成或已暂停，请刷新原任务',409);requireFact(access.canManage||node.owner.number===access.user.number,'只有当前主责或流程管理人可以交付',403);this.runtime.validateOwner(node,access.user.number,task.runtime.nodes);}
     return {task,node};
   }
   async cloud(request,path) {

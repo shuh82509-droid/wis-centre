@@ -4,7 +4,7 @@ const css=['style.css','studio.css','usability.css','personal.css','swimlane.css
 const vendor=['vendor/sha256.umd.min.js','vendor/md5.umd.min.js'].map(read).join('\n');
 const worker=vendor+'\n'+read('hash-worker.js');
 const product=read('../flow-product.mjs').replaceAll('export function ','function ');
-const js=product+'\n'+vendor+'\nconst FLOW_HASH_WORKER_SOURCE='+JSON.stringify(worker).replaceAll('</','<\\/')+';\n'+['flow-canvas.js','swimlane-view.js','people-picker.js','evidence-view.js','video-upload.js','board-view.js','personal-view.js','delivery.js','create-flow.js','studio-canvas.js','studio.js','app.js'].map(read).join('\n');
+const js=product+'\n'+vendor+'\nconst FLOW_HASH_WORKER_SOURCE='+JSON.stringify(worker).replaceAll('</','<\\/')+';\n'+['flow-canvas.js','swimlane-view.js','people-picker.js','evidence-view.js','video-upload.js','board-view.js','personal-view.js','delivery.js','create-flow.js','studio-canvas.js','studio.js','creative.js','app.js'].map(read).join('\n');
 const html=read('index.template.html').replace('/*STYLE*/',()=>css).replace('/*SCRIPT*/',()=>js);
 writeFileSync(new URL('index.html',import.meta.url),html);
 mkdirSync(new URL('../dist/workflow-panorama/',import.meta.url),{recursive:true});

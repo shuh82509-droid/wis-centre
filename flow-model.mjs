@@ -43,7 +43,11 @@ export function graphDetails(nodes, workflow) {
 // Both the panorama and actual execution resolve the same published graph.
 // Static business relationships remain labelled as reference links, never automatic routes.
 export function resolvedCatalog(access, active) {
-  const order = active?.moduleOrder || catalog.flows.filter(f=>f.id!=='06').map(f=>f.id);
+  const executionOrder=[...(active?.moduleOrder || catalog.flows.filter(f=>f.id!=='06'&&!f.sourceManaged).map(f=>f.id))].filter(id=>id!=='07');
+  const order = [...executionOrder];
+  // Source-driven creative work has its own fixed lane, also for blueprints
+  // published before the integration existed. Do not rewrite saved revisions.
+  const firstCreation=order.indexOf('01');order.splice(firstCreation<0?Math.min(1,order.length):firstCreation,0,'07');
   const flows = catalog.flows.filter(f=>flowAllowed(access,f.id))
     .sort((a,b)=>(order.includes(a.id)?order.indexOf(a.id):99)-(order.includes(b.id)?order.indexOf(b.id):99))
     .map(flow => {
@@ -55,8 +59,9 @@ export function resolvedCatalog(access, active) {
     });
   const visible = new Set(flows.map(f=>f.id));
   const moduleEdges = [];
-  for(let i=1;i<order.length;i++) if(visible.has(order[i-1])&&visible.has(order[i]))
-    moduleEdges.push({from:order[i-1],to:order[i],type:'sequence',enabled:active?.defaultRoute===true,label:active?.defaultRoute?'完成后自动交接':'业务顺序 · 自动交接未开启'});
+  for(let i=1;i<executionOrder.length;i++) if(visible.has(executionOrder[i-1])&&visible.has(executionOrder[i]))
+    moduleEdges.push({from:executionOrder[i-1],to:executionOrder[i],type:'sequence',enabled:active?.defaultRoute===true,label:active?.defaultRoute?'完成后自动交接':'业务顺序 · 自动交接未开启'});
+  if(visible.has('07')&&visible.has('01'))moduleEdges.push({from:'07',to:'01',type:'sequence',enabled:false,label:'创意审核后，由获准的一创任务承接'});
   for(const rule of active?.branches||[]) if(visible.has(rule.after)&&visible.has(rule.next))
     moduleEdges.push({from:rule.after,to:rule.next,type:'condition',enabled:rule.enabled===true,label:rule.when,condition:rule.when});
   for(const [from,to] of catalog.edges) if(visible.has(from)&&visible.has(to)&&!moduleEdges.some(e=>e.from===from&&e.to===to))
@@ -70,5 +75,5 @@ export function resolvedCatalog(access, active) {
     return from&&to&&from!==to?[{from,to}]:[];
   })).filter((e,i,all)=>all.findIndex(x=>x.from===e.from&&x.to===e.to)===i);
   return {...catalog,flows,stages,stageEdges,moduleEdges,blueprint:active?{
-    id:active.id,version:active.version,name:active.name,moduleOrder:order,defaultRoute:active.defaultRoute}:null};
+    id:active.id,version:active.version,name:active.name,moduleOrder:executionOrder,defaultRoute:active.defaultRoute}:null};
 }
