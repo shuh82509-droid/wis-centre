@@ -66,7 +66,7 @@ export const modules: AppModule[] = [
     tone: "amber",
     status: "beta",
     actionLabel: "进入系统",
-    url: modulePath("material-workbench/"),
+    url: modulePath("material-workbench/remix.html"),
     features: [
       { title: "选材与切片", description: "从素材库选片并整理可复用片段" },
       { title: "框架编排", description: "按照内容结构组合文案、镜头和片段" },
@@ -95,7 +95,7 @@ export const modules: AppModule[] = [
     index: "06",
     title: "直播间",
     kicker: "直播排班与现场管理",
-    description: "直播首页、数据中心和调度中心已接入隔离候选；历史人工记录仍待恢复，正式办理需通过本人及岗位验收。",
+    description: "统一查看直播经营、人员与排班，办理本人五环节工作；来源未验收的能力保留待核验提示。",
     purpose: "直播间",
     tone: "amber",
     status: "beta",
@@ -104,7 +104,7 @@ export const modules: AppModule[] = [
     features: [
       { title: "直播首页", description: "查看直播间、值班与状态" },
       { title: "数据中心", description: "核对场次与经营数据的真实来源" },
-      { title: "调度中心", description: "只读查看已核验的排班备份，历史待恢复" },
+      { title: "调度中心", description: "查看排班及恢复状态，未验收不自动派工" },
     ],
   },
 ];

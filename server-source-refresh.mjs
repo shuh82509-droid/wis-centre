@@ -6,6 +6,10 @@ import {join,resolve} from 'node:path';
 import {createHash,randomUUID} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 import {SparkLibraryStore,importSparkBatch} from './spark-library.mjs';
+import {OrganizationSourceStore,ORGANIZATION_SOURCE_KEYS} from './organization-daily-sources.mjs';
+import {directoryFromBlocks,meetingsFromRecords} from './organization-normalize.mjs';
+import {ORGANIZATION_BOARDS,organizationFromBoards} from './organization-board-source.mjs';
+import {nextSourceDue} from './source-schedule.mjs';
 
 const here=resolve(fileURLToPath(new URL('.',import.meta.url)));
 const dataRoot=resolve(process.env.DATA_DIR||join(here,'data'));
@@ -100,6 +104,51 @@ async function documentSource(entry,headers){
   const {items,truncated}=await pages('/docx/v1/documents/'+encodeURIComponent(documentId)+'/blocks',headers,{pageSize:500,maxPages:12});
   const blocks=items.map(block=>({id:block.block_id,text:blockText(block)})).filter(block=>block.id&&block.text);
   return {token,documentId,editedAt,url,blocks,truncated};
+}
+export function meetingDocumentReference(raw){
+  if(typeof raw!=='string')return null;
+  try{
+    const url=new URL(raw);
+    if(url.protocol!=='https:'||url.username||url.password||
+      !['www.feishu.cn','jqx28l0j4lx.feishu.cn'].includes(url.hostname))return null;
+    const match=url.pathname.match(/^\/(docx|wiki)\/([A-Za-z0-9]+)\/?$/u);
+    return match?{type:match[1],token:match[2]}:null;
+  }catch{return null;}
+}
+async function verifyMeetingDocuments(meeting,headers,directory){
+  const cache=new Map();
+  const read=async(url,reference)=>{
+    if(!cache.has(url))cache.set(url,(async()=>{
+      const source=await documentSource(reference,headers);
+      if(source.truncated||!source.blocks.length||source.blocks.map(b=>b.text).join('').length<20)
+        throw new Error('会议文档未返回完整可读正文');
+      const receipt={sourceUrl:url,documentId:source.documentId,readAt:iso(),sha256:sha(JSON.stringify(source.blocks)),blockCount:source.blocks.length};
+      await atomicJson(join(directory,'meeting-doc-'+sha(url).slice(0,16)+'.json'),{...receipt,blocks:source.blocks});
+      return receipt;
+    })());
+    return cache.get(url);
+  };
+  for(const item of meeting.items){
+    let failed=null;
+    for(const url of [item.transcriptUrl,item.minutesUrl]){
+      const reference=meetingDocumentReference(url);
+      if(!reference)continue;
+      try{
+        item.readEvidence=await read(url,reference);
+        item.readState='readable';
+        failed=null;break;
+      }catch(error){failed=error;}
+    }
+    if(item.readState!=='readable'&&failed){
+      item.readState=[131006,99991672].includes(Number(failed.code))?'blocked':'error';
+      item.readError=cleanError(failed);
+    }
+  }
+  const counts={readable:0,blocked:0,blank:0,unverified:0,error:0};
+  for(const item of meeting.items)counts[item.readState]++;
+  for(const [key,value] of Object.entries(counts))meeting[key+'Records']=value;
+  meeting.verification={note:`已按当日会议表链接读取纪要或逐字稿：${counts.readable}/${meeting.items.length} 条有正文凭证；受限 ${counts.blocked}、空链接 ${counts.blank}、其他读取失败 ${counts.error}。未读不按 0 评分。`};
+  return meeting;
 }
 async function chatSource(id,headers,since){
   const route='/im/v1/messages?container_id_type=chat&container_id='+encodeURIComponent(id)+
@@ -196,27 +245,95 @@ async function spark(headers,run,config){
   await atomicJson(statePath,next);
   run.spark={results,foundSources:sources.length,receipt,coverage:batch.coverage};
 }
-async function organization(headers,run){
+async function organization(headers,run,config){
   const docs={reportingDirectory:'FWrQdnvzxooaN5xqzOmchTKDnqc',organization:'IE67d4MdKo2xpqxvClLcYeACn15'};
-  const results={};
+  const results={},normalized={},factsDate=chinaDate(new Date(Date.now()-86400000));
   for(const [key,id] of Object.entries(docs)){
     try{
       const page=await pages('/docx/v1/documents/'+id+'/blocks',headers,{pageSize:500,maxPages:12});
       results[key]={state:page.truncated?'partial':'ready',blockCount:page.items.length,rawSha256:sha(JSON.stringify(page.items))};
       await atomicJson(join(run.directory,key+'.json'),page.items);
+      if(key==='reportingDirectory'&&!page.truncated)normalized[key]=directoryFromBlocks(page.items,iso());
+      if(key==='organization'&&!page.truncated){
+        const linked=page.items.filter(b=>b.board?.token).map(b=>b.board.token);
+        if(linked.length!==ORGANIZATION_BOARDS.length||!ORGANIZATION_BOARDS.every(id=>linked.includes(id)))throw new Error('组织资料画板来源已变化，保留上次成功版本');
+        const boards={};
+        for(const id of ORGANIZATION_BOARDS){
+          boards[id]=await api(base+'/board/v1/whiteboards/'+encodeURIComponent(id)+'/nodes',headers);
+          await atomicJson(join(run.directory,'board-'+id+'.json'),boards[id]);
+        }
+        normalized[key]=organizationFromBoards(page.items,boards,iso());
+        results[key].boardCount=ORGANIZATION_BOARDS.length;
+      }
     }catch(error){results[key]={state:'failed',error:cleanError(error)};}
   }
   try{
     const page=await pages('/bitable/v1/apps/HD6cbG8Tiae30Ts266bcoGMUnMd/tables/tblLfhIgmidjXyve/records',headers,{pageSize:200,maxPages:12});
     results.meetingEvidence={state:page.truncated?'partial':'ready',recordCount:page.items.length,rawSha256:sha(JSON.stringify(page.items))};
     await atomicJson(join(run.directory,'meeting-records.json'),page.items);
+    if(!page.truncated){
+      let fields;
+      try{fields=await pages('/bitable/v1/apps/HD6cbG8Tiae30Ts266bcoGMUnMd/tables/tblLfhIgmidjXyve/fields',headers,{pageSize:100,maxPages:10});}
+      catch(error){
+        // Field metadata needs a separate Feishu scope. Use the exact schema
+        // independently read by the owner on 2026-09-23, never guessed labels.
+        if(Number(error.code)!==99991672)throw error;
+        const reviewed=await readFile(join(here,'meeting-fields-reviewed.json'));
+        if(sha(reviewed)!=='de64a57fd2e3b9afa51d4b31d422698a3670308639437c3fde0c7ddd625d1136')throw new Error('会议字段核验文件发生变化');
+        const schema=JSON.parse(reviewed);
+        fields={items:schema.fields,truncated:false};
+        results.meetingEvidence.schemaVerifiedAt=schema.verifiedAt;
+        results.meetingEvidence.schemaMode='owner-verified-schema';
+      }
+      if(fields.truncated)throw new Error('会议字段未完整读取');
+      normalized.meetingEvidence=await verifyMeetingDocuments(
+        meetingsFromRecords(page.items,fields.items,{factsDate,readAt:iso()}),headers,run.directory);
+      results.meetingEvidence.readable=normalized.meetingEvidence.readableRecords;
+      await atomicJson(join(run.directory,'meeting-fields.json'),fields.items);
+    }
   }catch(error){results.meetingEvidence={state:'failed',error:cleanError(error)};}
-  run.organization={results,note:'原始来源已在服务器留证；尚未转换为组织看板发布对象，原看板业务日期保持不变。'};
+  if(normalized.reportingDirectory){
+    const reportResults=[];
+    for(const entry of config.documents){
+      let report;
+      try{
+        const page=await documentSource(entry,headers),readAt=iso();
+        await atomicJson(join(run.directory,'daily-'+entry.token+'.json'),page);
+        let factsDate=null,at=0;
+        for(let i=0;i<Math.min(page.blocks.length,200);i++){
+          const match=page.blocks[i].text.match(/(20\d{2})[年.\/-](\d{1,2})[月.\/-](\d{1,2})(?:日|\b)/);
+          if(match){factsDate=match[1]+'-'+match[2].padStart(2,'0')+'-'+match[3].padStart(2,'0');at=i;break;}
+        }
+        report={token:entry.token,state:page.truncated?'partial':'ready',readAt,factsDate,url:page.url,
+          excerpt:page.blocks.slice(at,at+12).map(b=>b.text).join('\n').slice(0,1600),rawSha256:sha(JSON.stringify(page.blocks))};
+      }catch(error){report={token:entry.token,state:'failed',readAt:iso(),factsDate:null,error:cleanError(error)};}
+      reportResults.push(report);
+      for(const center of normalized.reportingDirectory.entries)for(const link of center.reports){
+        if(link.url.includes('/'+entry.token))Object.assign(link,{collection:report});
+      }
+    }
+    results.dailyReports={state:reportResults.every(r=>r.state==='ready')?'ready':'partial',total:reportResults.length,readable:reportResults.filter(r=>r.state==='ready').length};
+    normalized.reportingDirectory.reportCoverage=results.dailyReports;
+  }
+  const store=new OrganizationSourceStore(join(dataRoot,'organization-sources'));
+  const before=await store.read({requiredBusinessDate:factsDate});
+  if(Object.keys(normalized).length){
+    const publishedAt=iso();
+    await store.publish({generationId:'server-'+Date.now(),publishedAt,expectedGeneration:before.generationId,
+      sources:Object.fromEntries(Object.entries(normalized).map(([key,data])=>[key,{data,lastSuccessAt:publishedAt}]))});
+  }
+  const after=await store.read({requiredBusinessDate:factsDate});
+  await store.writeStatus({schemaVersion:1,updatedAt:iso(),lastAttemptAt:run.startedAt,nextDueAt:nextSourceDue('organization').toISOString(),requiredBusinessDate:factsDate,
+    sources:Object.fromEntries(ORGANIZATION_SOURCE_KEYS.map(key=>[key,{state:normalized[key]?'ready':results[key]?.state||'pending',lastAttemptAt:run.startedAt,
+      lastSuccessAt:after.status[key]?.lastSuccessAt||null,factsDate:after.sources[key]?.factsDate??null,error:normalized[key]?null:results[key]?.error||'本轮未产生新的已核验来源'}]))});
+  run.organization={results,publishedKeys:Object.keys(normalized),generationId:after.generationId,factsDate,note:'完整来源已整理并发布；受阻来源保留原日期和失败状态。'};
 }
 export async function refresh(mode){
   if(!['spark','organization'].includes(mode))throw new Error('Unsupported server refresh mode');
   await mkdir(root,{recursive:true,mode:0o700});
-  const lockPath=join(root,mode+'.lock'),lock=await open(lockPath,'wx',0o600);
+  // The native scheduler uses a kernel lock, released even after a crash or
+  // container restart. Keep the legacy exclusive lock for direct invocations.
+  const lockPath=join(root,mode+'.lock'),lock=process.env.SOURCE_REFRESH_LOCK_HELD==='1'?null:await open(lockPath,'wx',0o600);
   try{
     const configBytes=await readFile(configPath);
     if(sha(configBytes)!==reviewedConfigSha256)throw new Error('Reviewed source allowlist checksum changed; stop before collecting');
@@ -228,7 +345,7 @@ export async function refresh(mode){
     const run={schemaVersion:1,mode,startedAt:iso(),businessDate:chinaDate(),directory};
     try{
       const headers=await token();
-      if(mode==='spark')await spark(headers,run,config);else await organization(headers,run);
+      if(mode==='spark')await spark(headers,run,config);else await organization(headers,run,config);
       run.state=mode==='spark'&&run.spark.coverage.failures.length===0&&run.spark.coverage.truncated===0?'success':
         mode==='organization'&&Object.values(run.organization.results).every(x=>x.state==='ready')?'sources_collected':'partial';
     }catch(error){run.state='failed';run.error=cleanError(error);}
@@ -237,7 +354,7 @@ export async function refresh(mode){
     await atomicJson(join(root,mode+'-latest.json'),{mode,state:run.state,at:run.finishedAt,businessDate:run.businessDate,receipt:join(directory,'receipt.json'),
       ...(mode==='spark'?{coverage:run.spark?.coverage,addedSources:run.spark?.receipt?.addedSources||0}:{results:run.organization?.results})});
     return run;
-  }finally{await lock.close();await unlink(lockPath);}
+  }finally{if(lock){await lock.close();await unlink(lockPath);}}
 }
 if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
   const mode=process.argv[2];

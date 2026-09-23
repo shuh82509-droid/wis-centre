@@ -34,8 +34,9 @@ export function sparkAccessFor(payload={}){
   const w=payload.workspace||{},u=payload.user||{};
   const number=String(u.number||u.user_number||u.userNumber||u.employeeId||u.id||'').trim().toUpperCase();
   const role=String(w.spark_role??w.role??'external');
-  const enabled=w.is_brand_department===true&&['director','manager'].includes(role)&&!!number&&payload.access?.master_access!==false;
-  return {enabled,canEdit:enabled,user:{number,name:String(u.realName||u.real_name||u.name||''),role,center:String(w.center||u.center||'')}};
+  const admitted=enforceConfirmedAdmission({status:200,payload}).status===200;
+  const enabled=w.is_brand_department===true&&!!number&&payload.access?.master_access!==false&&admitted;
+  return {enabled,canEdit:enabled&&['director','manager'].includes(role),user:{number,name:String(u.realName||u.real_name||u.name||''),role,center:String(w.center||u.center||'')}};
 }
 function previewAccess(preview,payload){
   if(!preview?.active)return sparkAccessFor(payload);
@@ -264,7 +265,7 @@ export function createSparkLibraryHandler({root,currentSession,previewFor=()=>nu
     if(url.pathname!=='/api/spark-library'&&!url.pathname.startsWith('/api/spark-library/'))return false;
     try{
       const session=await currentSession(req);if(session.status!==200){sendJson(res,session.status,session.payload);return true;}
-      const real=sparkAccessFor(session.payload);need(real.enabled,'部门星火库仅向品牌营销部负责人和各中心主管开放',403,'SPARK_ACCESS_DENIED');
+      const real=sparkAccessFor(session.payload);need(real.enabled,'部门星火库向已获准登录的品牌营销部成员开放',403,'SPARK_ACCESS_DENIED');
       const preview=previewFor(req,session.payload),access=previewAccess(preview,session.payload);
       need(access.enabled,'当前预览身份不能访问部门星火库',403,'SPARK_PREVIEW_DENIED');
       const method=req.method||'GET',path=url.pathname.slice('/api/spark-library'.length);
@@ -277,7 +278,8 @@ export function createSparkLibraryHandler({root,currentSession,previewFor=()=>nu
       if(method==='GET'&&match){let itemId;try{itemId=decodeURIComponent(match[1]);}catch{throw new SparkError(400,'条目标识无效');}
         const all=readSparkOverview(store,access),item=all.items.find(i=>i.id===itemId);need(item,'条目不存在',404);sendJson(res,200,{ok:true,item,sources:all.sources.filter(s=>item.sourceIds.includes(s.id)),revision:all.revision,access:all.access});return true;}
       if(method==='GET')throw new SparkError(404,'星火库接口不存在');
-      need(!preview?.active,'请退出权限预览后修改星火库',403,'SPARK_PREVIEW_READONLY');writeGate(req);
+      need(!preview?.active,'请退出权限预览后修改星火库',403,'SPARK_PREVIEW_READONLY');
+      need(real.canEdit,'当前身份可查看部门星火库，编辑和导入需负责人或主管权限',403,'SPARK_WRITE_DENIED');writeGate(req);
       if(path==='/items'&&method==='POST'){
         const body=await readInput(req,1024*1024);need(object(body)&&object(body.item),'条目内容无效');
         const result=createSparkItem(store,body.item,real,req.headers['idempotency-key']||'');sendJson(res,201,result);return true;

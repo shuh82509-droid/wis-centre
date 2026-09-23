@@ -86,12 +86,14 @@ test('Shanghai business date accepts prior UTC day at local midnight',()=>{
  const input=records();input.data.data[0][0]='2026-09-07T16:00:00Z';
  assert.equal(meetingEvidenceFromCli(input,{factsDate:businessDate,readAt,sourceUrl,rawSha256:hash('fixture')}).items[0].date,businessDate);
 });
-test('readability requires a hash, timestamp and this actual transcript URL',()=>{
+test('readability requires a hash, timestamp and the linked transcript or minutes URL',()=>{
  const data=meeting();data.items[0].readState='readable';data.readableRecords=1;data.unverifiedRecords=0;
  assert.throws(()=>validateSourceData('meetingEvidence',data));
  data.items[0].readEvidence={sha256:hash('transcript'),readAt,sourceUrl:'https://fixture.invalid/unrelated'};
  assert.throws(()=>validateSourceData('meetingEvidence',data));
  data.items[0].readEvidence.sourceUrl=data.items[0].transcriptUrl;
+ assert.equal(validateSourceData('meetingEvidence',data),data);
+ data.items[0].readEvidence.sourceUrl=data.items[0].minutesUrl;
  assert.equal(validateSourceData('meetingEvidence',data),data);
  data.readableRecords=20;assert.throws(()=>validateSourceData('meetingEvidence',data));
 });

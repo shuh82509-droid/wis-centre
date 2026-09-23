@@ -201,8 +201,9 @@ export const api = {
     { method: "POST", body: JSON.stringify({ mode }) },
     "api/creative-incentives/overview",
   ),
-  organizationDashboard: (date: string, days = 7, preview?: PermissionPreview | null) => {
+  organizationDashboard: (date: string, days = 7, preview?: PermissionPreview | null, force = false) => {
     const params = new URLSearchParams({ date, days: String(days) });
+    if (force) params.set("refresh", "1");
     params.set("preview_scope", preview?.active ? preview.scope : "real");
     if (preview?.active && preview.scope === "center") params.set("preview_center", preview.center);
     if (preview?.active && preview.person) params.set("preview_person", preview.person);

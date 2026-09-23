@@ -12,7 +12,7 @@ const key=s=>JSON.stringify([s.user.number||s.user.userId||s.user.id,s.workspace
 const team={access:{number:'SELF',canManage:true},blueprint:{name:'TEAM_BLUEPRINT'},executionRoutes:[{flow:'02',name:'TEAM_ROUTE',module:'material-workbench'}],tasks:[{id:'task_other',title:'OTHER_COLLEAGUE_TASK',state:'running',nodes:[]}],metrics:{active:1,completed:0,overdue:0,notificationAttention:0}};
 function render(s,data,savedScope=key(session)){
  const states=[data?{scope:savedScope,data}:null,''];
- const exports={},ctx=vm.createContext({exports,require:name=>name==='react'?{useState:init=>[states.length?states.shift():init,()=>{}],useEffect:()=>{}}:name==='react/jsx-runtime'?{jsx:(type,props)=>({type,props}),jsxs:(type,props)=>({type,props})}:name.endsWith('.css')?{}:(()=>{throw Error(name);})()});
+ const exports={},ctx=vm.createContext({exports,URL,window:{location:{href:'https://hub.fandow.com/yxb/wis-marketing-hub/'}},require:name=>name==='react'?{useState:init=>[states.length?states.shift():init,()=>{}],useEffect:()=>{}}:name==='react/jsx-runtime'?{jsx:(type,props)=>({type,props}),jsxs:(type,props)=>({type,props})}:name.endsWith('.css')?{}:(()=>{throw Error(name);})()});
  vm.runInContext(output,ctx);let tree=exports.FlowInboxSummary({session:s});if(typeof tree?.type==='function')tree=tree.type(tree.props);return tree;
 }
 const text=tree=>JSON.stringify(tree,(k,v)=>typeof v==='function'?undefined:v);

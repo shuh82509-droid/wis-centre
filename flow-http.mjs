@@ -3,7 +3,7 @@ import {WorkflowError,requireFact} from './workflow-store.mjs';
 import {executionGraph,graphDetails,resolvedCatalog} from './flow-model.mjs';
 import {createReadStream} from 'node:fs';
 import {canConfigure,configurationDepartment,configurationEndpoint} from './flow-configuration-access.mjs';
-export function createFlowHandler({runtime,sources,notifier,automation,creative,creativeStatus,localBusinessStatus,blueprints,evidenceReader,delivery,currentSession,accessFor,previewFor,readJson,sendJson,writesEnabled=true,writeAccounts=null}){
+export function createFlowHandler({runtime,sources,notifier,automation,creative,creativeStatus,localBusinessStatus,blueprints,evidenceReader,delivery,liveSessions,currentSession,accessFor,previewFor,readJson,sendJson,writesEnabled=true,writeAccounts=null}){
  return async(req,res,url)=>{if(!url.pathname.startsWith('/api/flows/'))return false;try{
   const session=await currentSession(req);if(session.status!==200){sendJson(res,session.status,session.payload);return true;}const a=accessFor(session.payload);requireFact(a.enabled,'当前身份未开放品牌营销部工作流',403);requireFact(!previewFor(req,session.payload)?.active,'请退出权限预览后使用真实工作流',403);
   const path=url.pathname.slice('/api/flows/'.length);
@@ -13,6 +13,14 @@ export function createFlowHandler({runtime,sources,notifier,automation,creative,
   if(req.method!=='GET'&&writeAccounts&&!['preview','blueprints/nodes','blueprints/preview'].includes(path))requireFact(writeAccounts.includes(a.user.number),'当前候选仅开放给指定验收账号，生产任务不受影响',403);
   const fileMatch=path.match(/^runs\/(task_[a-z0-9]+)\/attachments\/(attachment_[a-f0-9]{32})\/content$/);
   if(req.method!=='GET'){requireFact(writesEnabled||['preview','blueprints/nodes','blueprints/preview'].includes(path),'流程维护中，已有资料已保留',503);requireFact(req.headers['x-flow-request']==='1'&&String(req.headers['content-type']||'').startsWith(fileMatch&&req.method==='PUT'?'application/octet-stream':'application/json'),'请从中枢页面提交操作',403);requireFact(req.headers['sec-fetch-site']!=='cross-site','不接受跨站请求',403);if(req.headers.origin)requireFact(new URL(req.headers.origin).host===req.headers.host,'不接受跨站请求',403);}
+  if(path.startsWith('live/')){
+    requireFact(liveSessions,'直播工作流尚未配置',503);
+    if(req.method==='GET'&&path==='live/today')sendJson(res,200,liveSessions.today(a));
+    else if(req.method==='GET'&&path==='live/schedule')sendJson(res,200,await liveSessions.preview(a,req,url.searchParams.get('date')));
+    else if(req.method==='POST'&&path==='live/sessions')sendJson(res,201,await liveSessions.create(a,req,await readJson(req,65536),req.headers['idempotency-key']));
+    else if(req.method==='POST'&&path==='live/restore-source')sendJson(res,200,await liveSessions.restoreSource(a,req,await readJson(req,65536),req.headers['idempotency-key']));
+    else throw new WorkflowError(404,'直播工作流接口不存在');return true;
+  }
   if(req.method==='GET'&&path==='products'){requireFact(delivery,'交付服务待接入',503);sendJson(res,200,await delivery.products(req));return true;}
   if(path.startsWith('creative/')){
    requireFact(creative,'创意来源同步服务尚未连接',503);creative.assertAccess(a);
@@ -62,7 +70,7 @@ export function createFlowHandler({runtime,sources,notifier,automation,creative,
   if(req.method==='POST'&&path==='runs'){sendJson(res,201,runtime.create(a,await readJson(req,65536),req.headers['idempotency-key']));return true;}
   const handoff=path.match(/^runs\/(task_[a-z0-9]+)\/handoff$/);if(req.method==='POST'&&handoff){sendJson(res,200,runtime.configureHandoff(a,handoff[1],await readJson(req,65536),req.headers['idempotency-key']));return true;}
   const match=path.match(/^runs\/(task_[a-z0-9]+)(?:\/(complete|return|assign|extend|pause|resume|cancel))?$/);
-  if(match){if(req.method==='GET'&&!match[2])sendJson(res,200,runtime.get(a,match[1]));else{requireFact(req.method==='POST'&&match[2],'请求方式不支持',405);const b=await readJson(req,65536),t=runtime.get(a,match[1]),n=t.runtime.nodes.find(n=>n.id===b.nodeId);let verifiedEvidence=null;if(match[2]==='complete'&&n?.state==='ready'&&b.expectedVersion===t.version){requireFact(a.canManage||n.owner.number===a.user.number,'只有当前主责或流程管理人可以办理',403);verifiedEvidence=await evidenceReader?.prepare(req,a,t,b.nodeId,b);if(!verifiedEvidence)verifiedEvidence=await delivery?.prepare(req,a,t.id,b.nodeId,b);}sendJson(res,200,runtime.command(a,match[1],match[2],b,req.headers['idempotency-key'],{verifiedEvidence}));}return true;}
+  if(match){if(req.method==='GET'&&!match[2])sendJson(res,200,runtime.get(a,match[1]));else{requireFact(req.method==='POST'&&match[2],'请求方式不支持',405);const b=await readJson(req,65536),t=runtime.get(a,match[1]),n=t.runtime.nodes.find(n=>n.id===b.nodeId);let verifiedEvidence=null;if(match[2]==='complete'&&n?.state==='ready'&&b.expectedVersion===t.version){requireFact(a.canManage||n.owner.number===a.user.number,'只有当前主责或流程管理人可以办理',403);if(t.runtime.liveSession){requireFact(liveSessions,'直播来源核验尚未配置',503);await liveSessions.verifyCurrent(a,req,t.id);}verifiedEvidence=await evidenceReader?.prepare(req,a,t,b.nodeId,b);if(!verifiedEvidence)verifiedEvidence=await delivery?.prepare(req,a,t.id,b.nodeId,b);}sendJson(res,200,runtime.command(a,match[1],match[2],b,req.headers['idempotency-key'],{verifiedEvidence}));}return true;}
   const notification=path.match(/^notifications\/(notice_[a-z0-9]+)\/retry$/);if(req.method==='POST'&&notification){sendJson(res,200,notifier.retry(a,notification[1]));return true;}
   if(req.method==='GET'&&path==='data-catalog'){sendJson(res,200,{schema:'wis.workflow.v1',generatedAt:new Date().toISOString(),registrationState:'deferred_by_owner',entities:[{name:'workflow_templates',primaryKey:'version + flow + node',query:'catalog'},{name:'workflow_runs',primaryKey:'task_id',query:'overview'},{name:'workflow_nodes',primaryKey:'task_id + node_id + attempt',fields:['owner','state','startedAt','dueAt','completedAt','durationSeconds','evidence']},{name:'workflow_events',primaryKey:'event_id',query:'runs/{task_id}'},{name:'notification_receipts',primaryKey:'notification_id',fields:['recipient','state','messageId','sentAt']}],policy:'OA会话和原角色范围；查询仅返回当前可见任务，缺失值为null。'});return true;}
   throw new WorkflowError(404,'工作流接口不存在');

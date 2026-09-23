@@ -1,0 +1,51 @@
+{
+  "verifiedAt": "2026-09-23T07:40:44.070Z",
+  "identity": "user",
+  "sourceUrl": "https://jqx28l0j4lx.feishu.cn/base/HD6cbG8Tiae30Ts266bcoGMUnMd?table=tblLfhIgmidjXyve",
+  "fields": [
+    {
+      "field_id": "fldN37U91V",
+      "field_name": "父记录"
+    },
+    {
+      "field_id": "fldfzveN2A",
+      "field_name": "会议主题"
+    },
+    {
+      "field_id": "fldRIhhpVW",
+      "field_name": "TODO"
+    },
+    {
+      "field_id": "fldxwsGf9P",
+      "field_name": "所属中心"
+    },
+    {
+      "field_id": "fldD7wGKNW",
+      "field_name": "所属部门"
+    },
+    {
+      "field_id": "fldCDALUlW",
+      "field_name": "会议日期"
+    },
+    {
+      "field_id": "fldDSokJfW",
+      "field_name": "录音转文字文档"
+    },
+    {
+      "field_id": "fldTiNvbqO",
+      "field_name": "妙记链接"
+    },
+    {
+      "field_id": "fld2kmfTRU",
+      "field_name": "会议组织人"
+    },
+    {
+      "field_id": "fldKrGROSy",
+      "field_name": "纪要链接"
+    },
+    {
+      "field_id": "fldkcN0uem",
+      "field_name": "创建人"
+    }
+  ]
+}

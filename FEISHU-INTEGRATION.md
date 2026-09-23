@@ -35,7 +35,7 @@ Node.js 24 运行 `node service-notifications-production.mjs`，无需启动中�
 | `FEISHU_RECIPIENT_MAP_JSON` | 已核验的工号到飞书账号映射 |
 | `NOTIFICATION_ALLOWED_NUMBERS` | 可选发送工号范围，以逗号分隔 |
 
-中枢配置 `FLOW_BUSINESS_SNAPSHOT` 指向共享快照；`SERVICE_NOTIFICATION_OWNERS=remix,cloud,idea` 使来源常规通知由独立后台负责。需要外部协作人员时，在两侧显式配置 `FLOW_EXTERNAL_COLLABORATOR_NUMBERS`，仍需有效 OA 授权及模块权限。生产拒绝本地占位身份替代配置。
+中枢配置 `FLOW_BUSINESS_SNAPSHOT` 指向共享快照。流程引擎只在该快照新鲜且 `notificationsEnabled=true` 时，自动把 `remix`、`cloud`、`idea` 的常规通知交给独立后台；`SERVICE_NOTIFICATION_OWNERS` 环境变量不会被读取。需要外部协作人员时，在两侧显式配置 `FLOW_EXTERNAL_COLLABORATOR_NUMBERS`，仍需有效 OA 授权及模块权限。生产拒绝本地占位身份替代配置。
 
 消息入口通过 `CREATIVE_NOTIFICATION_PUBLIC_URL`、`REMIX_NOTIFICATION_PUBLIC_URL`、`CLOUD_NOTIFICATION_PUBLIC_URL` 配置，默认是 `https://hub.fandow.com/yxb/wis-marketing-hub/modules/` 下的 `creative-hub/`、`material-workbench/`、`cloud-manager/`。流程消息部署时设置 `FLOW_PUBLIC_URL=https://hub.fandow.com/yxb/wis-marketing-hub/workflow-panorama/`。
 

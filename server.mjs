@@ -1,6 +1,7 @@
 import {ProductionSources} from './flow-production-sources.mjs';
 import { createReadStream, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
+import {startSourceScheduler} from './source-scheduler.mjs';
 import { createServer } from "node:http";
 import { createHash } from "node:crypto";
 import { extname, join, normalize, resolve, sep } from "node:path";
@@ -19,6 +20,10 @@ import { OrganizationSourceStore, projectOrganizationSnapshot } from "./organiza
 import { rootMaterialRequest, normalizeRootMaterialUploads, rootMaterialSnapshotForDate, rootSourceRefreshState } from "./organization-root-adapter.mjs";
 import { workflowExecutionPolicy } from './workflow-execution-policy.mjs';
 import { FlowRuntime } from './flow-runtime.mjs';
+import { LiveSessionFlow } from './live-session-flow.mjs';
+import { createOfficialLiveScheduleReader } from './live-official-schedule.mjs';
+import { LiveAutoDispatch } from './live-auto-dispatch.mjs';
+import { createLiveScheduleReader } from './live-schedule-reader.mjs';
 import { FlowSources } from './flow-sources.mjs';
 import { FlowFeishu } from './flow-feishu.mjs';
 import { createFlowHandler } from './flow-http.mjs';
@@ -56,14 +61,15 @@ const authorityBase = String(
   process.env.CENTRAL_AUTHORITY_BASE ||
     "https://app.fandow.top/fd-026222/wis-video-center/api",
 ).replace(/\/+$/u, "");
-// IMPORTANT: ROOT_DASHBOARD_API_BASE 必须使用公网 URL（下方默认值），禁止注入内部别名。
+// ROOT_DASHBOARD_API_BASE uses the current canonical public host. The legacy
+// app.fandow.top host now returns 308, which redirect:manual treats as data loss.
 // 2026-09 事故：环境变量曾被注入 http://wis-root-authorized-data:3000，但该别名依赖
 // Docker 自定义网络；deploy-flow-configuration.py 在容器处于默认 bridge 网络时会丢弃
 // 网络别名（bridge 不支持 --network-alias），导致 fetch 报 ENOTFOUND，根数据看板与
 // 每日素材快照连续断档。切勿回退到内部别名。
 const rootDashboardApiBase = String(
   process.env.ROOT_DASHBOARD_API_BASE ||
-    "https://app.fandow.top/fd-026222/wis-data-dashboard/api",
+    "https://app.fandow.com/fd-026222/wis-data-dashboard/api",
 ).replace(/\/+$/u, "");
 const authSessionBase = String(process.env.CENTRAL_AUTH_SESSION_BASE || "").replace(/\/+$/u, "");
 const sessionCache = new Map();
@@ -2006,13 +2012,14 @@ function dashboardSourceRequests(url) {
 
 function startDashboardJob(request, url) {
   const key = dashboardJobKey(request, url);
+  const force = url.searchParams.get("refresh") === "1";
   const now = Date.now();
   const existing = key ? dashboardJobs.get(key) : null;
   const retryTransientFailure = existing?.completedAt
     && now - existing.completedAt >= 5_000
     && Object.values(existing.attempts || existing.results || {}).some(transientAuthorityFailure);
   const officialRefresh = existing ? officialBusinessRefreshState(existing, now) : null;
-  if (existing && now - existing.createdAt < dashboardJobTtlMs && (!retryTransientFailure || officialRefresh?.pending || officialRefresh?.exhausted)) {
+  if (existing && !force && now - existing.createdAt < dashboardJobTtlMs && (!retryTransientFailure || officialRefresh?.pending || officialRefresh?.exhausted)) {
     // An HTTP 200 can still be a cold official aggregation. Re-read just this
     // business result; leave member/OA, work, realtime and uploads untouched.
     const recheck = recheckOfficialBusiness(existing, () => {
@@ -3084,15 +3091,22 @@ const flowAccessFor = payload => {
 const productionSources=process.env.FLOW_BUSINESS_SNAPSHOT?new ProductionSources(flowRuntime,flowSources,{file:process.env.FLOW_BUSINESS_SNAPSHOT,externalNumbers:(process.env.FLOW_EXTERNAL_COLLABORATOR_NUMBERS||'').split(',').filter(Boolean)}):null;
 const flowBlueprints=new FlowBlueprints(flowRuntime);flowRuntime.blueprints=flowBlueprints;
 const flowAutomation=new FlowAutomation(flowRuntime,flowSources);
+const liveSessions=new LiveSessionFlow(flowRuntime,{enabled:process.env.FLOW_LIVE_SESSIONS_ENABLED==='true',readSchedule:process.env.FLOW_LIVE_OFFICIAL_SOURCE==='true'?createOfficialLiveScheduleReader({appId:process.env.FEISHU_APP_ID,appSecret:process.env.FEISHU_APP_SECRET}):process.env.HUB_INTEGRATED_MODE==='1'?createLiveScheduleReader({publicUrl:process.env.FLOW_PUBLIC_URL}):null});
+const liveAutoDispatch=new LiveAutoDispatch(liveSessions,{enabled:process.env.FLOW_LIVE_AUTO_DISPATCH==='true'&&process.env.FLOW_LIVE_OFFICIAL_SOURCE==='true'});
 const flowExecution=workflowExecutionPolicy();
-const flowHandler=createFlowHandler({runtime:flowRuntime,creative:productionSources?.creative,creativeStatus:()=>productionSources?.status()||{},localBusinessStatus:()=>productionSources?.business.status()||{},automation:flowAutomation,blueprints:flowBlueprints,sources:flowSources,notifier:flowNotifier,evidenceReader:new FlowEvidence({sources:flowSources,readCloud:callAuthority}),delivery:new FlowDelivery({runtime:flowRuntime,readCloud:callAuthority,root:join(dataRoot,'flow-deliveries')}),currentSession,accessFor:flowAccessFor,previewFor:permissionPreviewFor,readJson:readTaskJsonBody,sendJson,writesEnabled:flowExecution.writesEnabled,writeAccounts:flowExecution.writeAccounts});
+const flowHandler=createFlowHandler({runtime:flowRuntime,creative:productionSources?.creative,creativeStatus:()=>productionSources?.status()||{},localBusinessStatus:()=>productionSources?.business.status()||{},liveSessions,automation:flowAutomation,blueprints:flowBlueprints,sources:flowSources,notifier:flowNotifier,evidenceReader:new FlowEvidence({sources:flowSources,readCloud:callAuthority}),delivery:new FlowDelivery({runtime:flowRuntime,readCloud:callAuthority,root:join(dataRoot,'flow-deliveries')}),currentSession,accessFor:flowAccessFor,previewFor:permissionPreviewFor,readJson:readTaskJsonBody,sendJson,writesEnabled:flowExecution.writesEnabled,writeAccounts:flowExecution.writeAccounts});
 const shutdown=createGracefulShutdown();
+const sourceScheduler=startSourceScheduler({dataRoot,script:fileURLToPath(new URL('./server-source-refresh.mjs',import.meta.url)),enabled:process.env.SOURCE_SCHEDULER_ENABLED==='true'});
+shutdown.onStop(()=>sourceScheduler.stop());
 const refreshFlowSources=()=>shutdown.trackBackground('flow-source-refresh',async()=>{await flowSources.refresh();await waitForWorkerExit(flowSources.worker);}).catch(()=>console.error('Workflow source refresh pending; previous records retained'));
 if (process.env.FLOW_SOURCE_REFRESH_ENABLED !== 'false') void refreshFlowSources();
 const flowSourceTimer=process.env.FLOW_SOURCE_REFRESH_ENABLED === 'false' ? null : setInterval(()=>void refreshFlowSources(),30000);
 flowSourceTimer?.unref();
 let flowTickBusy=false;
 const flowTickTimer=setInterval(()=>{if(flowTickBusy||shutdown.draining)return;flowTickBusy=true;void shutdown.trackBackground('flow-tick-and-notification-receipts',async()=>{try{if(flowExecution.backgroundEnabled){await productionSources?.sync();flowAutomation.reconcile();flowRuntime.tick();await flowNotifier.flush();}}catch{console.error('Workflow background pending; persisted events retained');}finally{flowTickBusy=false;}});},5000);flowTickTimer.unref();
+// Keep Feishu source latency isolated from existing workflow notifications.
+const liveDispatchTimer=setInterval(()=>{if(!shutdown.draining&&flowExecution.backgroundEnabled)void shutdown.trackBackground('live-auto-dispatch',()=>liveAutoDispatch.tick()).catch(()=>console.error('Live dispatch pending; existing work retained'));},30000);liveDispatchTimer.unref();
+shutdown.onStop(()=>clearInterval(liveDispatchTimer));
 shutdown.onStop(()=>{clearInterval(flowSourceTimer);clearInterval(flowTickTimer);});
 const workflowEngine = new TaskWorkflow(workflowStore, { resolveAssignees: taskCenterResolveAssignees, saveVideo: taskCenterSaveVideo });
 const workflowAssistant = new WorkflowAssistant(workflowStore, { provider: configuredProvider(), model: process.env.WORKFLOW_AI_MODEL || 'not-configured' });

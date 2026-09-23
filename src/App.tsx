@@ -36,6 +36,7 @@ import { api, ApiError, isTransientApiError } from "./api";
 import { modules } from "./data";
 import { OrganizationDashboardPage } from "./OrganizationDashboard";
 import { FlowInboxSummary } from "./FlowInboxSummary";
+import { LiveDailyWork } from "./LiveDailyWork";
 import { SparkLibrary } from "./SparkLibrary";
 import { sourceTime } from "./sourceTime";
 import { embeddedCloudAsset, initialModule } from "./moduleLocation";
@@ -717,6 +718,7 @@ function HubHome({ session, notify, onOpenModule }: { session: HubSession; notif
           <span><b>业务模块</b>{visibleModules.length} 个</span>
         </div>}
       </section>
+      <LiveDailyWork session={session} />
       <FlowInboxSummary session={session} onRouteOrder={setRouteOrder} />
       <WorkspacePublicSummary session={session} />
       {(workspace.role === "director" || workspace.role === "manager") && (
@@ -2147,6 +2149,7 @@ function HubShell({ session, onLogout }: { session: HubSession; onLogout: () => 
           </div>
         </header>
         {preview.active && <div className="permission-preview-banner"><ShieldLockRegular /><span><strong>权限视角预览中：{preview.label}</strong><small>只改变当前最高权限账号的展示范围；真实授权、业务数据和其他成员均未改动。</small></span><button onClick={() => void applyPreview("real", "", "")}>退出预览</button></div>}
+        {view === "hub" && selectedModule?.id === "live-room-management" && !preview.active && <LiveDailyWork session={presentationSession} compact />}
         {view === "hub" && selectedModule && <EmbeddedModulePage module={selectedModule} onReturn={() => navigateTo("hub")} />}
         {view === "hub" && !selectedModule && <HubHome session={presentationSession} notify={setNotice} onOpenModule={openModule} />}
         {view === "organization" && canViewOrganization && <OrganizationDashboardPage session={presentationSession} preview={preview} entryScrollTop={organizationEntryScrollTop} onAsk={(prompt) => askAssistant(prompt, "组织经营看板")} />}

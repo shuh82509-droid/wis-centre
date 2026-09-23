@@ -157,6 +157,8 @@ export function OrganizationDashboardPage({ session, preview, entryScrollTop = n
   const [data, setData] = useState<OrganizationDashboardOverview | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [realtimeRefreshing, setRealtimeRefreshing] = useState(false);
+  const [realtimeRefreshError, setRealtimeRefreshError] = useState("");
   const [memberQuery, setMemberQuery] = useState("");
   const [memberPage, setMemberPage] = useState(1);
   const [heatmapQuery, setHeatmapQuery] = useState("");
@@ -378,6 +380,32 @@ export function OrganizationDashboardPage({ session, preview, entryScrollTop = n
       setWorkSchedulerBusy(false);
     }
   };
+  const refreshRealtime = async () => {
+    if (realtimeRefreshing) return;
+    const key = activeQuery.current;
+    setRealtimeRefreshing(true);
+    setRealtimeRefreshError("");
+    try {
+      let next = await api.organizationDashboard(selectedDate, days, preview, true);
+      if (activeQuery.current !== key) return;
+      setData(next);
+      for (let attempt = 0; attempt < 40 && next.rootRefresh?.realtime.refreshing; attempt += 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, 1_500));
+        if (activeQuery.current !== key) return;
+        next = await api.organizationDashboard(selectedDate, days, preview);
+        setData(next);
+      }
+      if (activeQuery.current !== key) return;
+      const source = next.rootRefresh?.realtime;
+      if (source?.refreshing) setRealtimeRefreshError("本次读取仍在进行，请稍后再刷新查看。保留原数据和更新时间。");
+      else if (source?.failureStatus) setRealtimeRefreshError(`本次读取失败（HTTP ${source.failureStatus}）。请检查根数据登录状态；页面未用 0 补齐。`);
+      else if (!next.omnichannelRealtime) setRealtimeRefreshError("根数据尚未返回可用的 GSV 数据，请稍后重试。页面未用 0 补齐。");
+    } catch (cause) {
+      if (activeQuery.current === key) setRealtimeRefreshError(cause instanceof ApiError ? cause.message : "刷新失败，请稍后重试；原数据仍保留。");
+    } finally {
+      setRealtimeRefreshing(false);
+    }
+  };
 
   const checkWorkScheduler = async () => {
     if (workRequestId) { setWorkCheckEpoch((value) => value + 1); return; }
@@ -430,7 +458,7 @@ export function OrganizationDashboardPage({ session, preview, entryScrollTop = n
         <em>根数据事实层</em>
       </section>}
 
-      <OmnichannelRealtime data={data?.omnichannelRealtime || null} />
+      <OmnichannelRealtime data={data?.omnichannelRealtime || null} onRefresh={() => void refreshRealtime()} refreshing={realtimeRefreshing} refreshError={realtimeRefreshError || (data?.rootRefresh?.realtime.failureStatus ? `读取失败（HTTP ${data.rootRefresh.realtime.failureStatus}），请检查根数据登录状态。` : "")} />
       <DailySourceStatus data={data} />
 
       {data?.organization && <section className="org-structure-card">
@@ -453,7 +481,7 @@ export function OrganizationDashboardPage({ session, preview, entryScrollTop = n
 
       {data?.reportingDirectory?.entries.length ? <section className="org-report-directory">
         <header><div><span>DAILY REPORT DIRECTORY</span><h2>中心固定日报与经营入口</h2><p>{data.reportingDirectory.guidance.deadline} · {data.reportingDirectory.guidance.coverage} · {data.reportingDirectory.guidance.updateMode}</p></div><a href={data.reportingDirectory.sourceUrl} target="_blank" rel="noreferrer">查看飞书目录 ↗</a></header>
-        <div>{data.reportingDirectory.entries.map((entry) => <article key={`${entry.channel}-${entry.center}-${entry.owner}`}><span>{entry.channel}</span><strong>{entry.center}<small>负责人：{entry.owner}</small></strong><nav>{entry.reports.map((item) => <a href={item.url} target="_blank" rel="noreferrer" key={item.url}>{item.title}</a>)}{entry.dashboards.map((item) => <a href={item.url} target="_blank" rel="noreferrer" key={item.url}>{item.title}</a>)}</nav></article>)}</div>
+        <div>{data.reportingDirectory.entries.map((entry) => <article key={`${entry.channel}-${entry.center}-${entry.owner}`}><span>{entry.channel || '中心资料'}</span><strong>{entry.center}<small>{entry.owner ? `负责人：${entry.owner}` : '负责人按组织名单核验'}</small></strong><nav>{entry.reports.map((item) => <div key={item.url} style={{width:'100%'}}><a href={item.url} target="_blank" rel="noreferrer">{item.title} ↗</a>{item.collection && <details style={{marginTop:8,padding:10,background:'#f5f9fc',borderRadius:8}}><summary style={{cursor:'pointer'}}>{item.collection.state === 'failed' ? '读取受限' : item.collection.factsDate ? `原文日期 ${item.collection.factsDate}` : '原文日期待核验'} · 展开原文</summary><small style={{display:'block',marginTop:6}}>采集于 {sourceTime(item.collection.readAt)} · 原文摘录</small><p style={{whiteSpace:'pre-wrap',lineHeight:1.7,fontSize:12,maxHeight:280,overflowY:'auto'}}>{item.collection.error || item.collection.excerpt || '原文暂无可显示正文'}</p></details>}</div>)}{entry.dashboards.map((item) => <a href={item.url} target="_blank" rel="noreferrer" key={item.url}>{item.title}</a>)}</nav></article>)}</div>
         <footer><span>固定字段：{data.reportingDirectory.guidance.fields.join("、")}</span><small>{data.reportingDirectory.visibilityNote} · revision {data.reportingDirectory.revision}</small></footer>
       </section> : null}
 
@@ -492,7 +520,7 @@ export function OrganizationDashboardPage({ session, preview, entryScrollTop = n
         <MetricCard label="素材有效率" value={rate(business?.summary.effectiveMaterialRate)} note={isOfficialMaterial(business) ? "官方视频报表 · 有效账户素材-天 / 有消耗账户素材-天" : "根数据链路 · 有效素材 / 有消耗素材样本"} state={business ? business.status === "stale" ? "warning" : "ready" : "pending"} />
         {isOfficialMaterial(business) && <MetricCard label="含券视频归因成交" value={money(business?.summary.materialCouponInclusiveGmvYuan ?? business?.summary.materialAttributedGmvYuan)} note={`${business?.query.materialStartDate} 至 ${business?.query.materialEndDate} · ${business?.coverage.material.source}`} state={business?.status === "stale" ? "warning" : "ready"} />}
         {isOfficialMaterial(business) && <MetricCard label="视频实际支付归因金额" value={money(business?.summary.materialActualPayGmvYuan)} note="官方视频支付归因口径；与含券成交分列，不加进店铺有效 GSV" state={business?.status === "stale" ? "warning" : "ready"} />}
-        <MetricCard label="关键工作证据覆盖" value={meeting ? `${meeting.coverage.readableRecords}/${meeting.coverage.dailyRecords}` : "待接入"} note={meeting ? (meeting.date || "日期待核验") + " 会议原文可读数；完成率仍需 OA 验收" : "OA任务 + 会议承诺项 + 验收结果"} state={meeting ? "warning" : "pending"} />
+        <MetricCard label="关键工作证据覆盖" value={meeting ? `${meeting.coverage.readableRecords}/${meeting.coverage.dailyRecords}` : "待接入"} note={meeting ? (meeting.date || "日期待核验") + " 会议纪要/逐字稿可读数；完成率仍需 OA 验收" : "OA任务 + 会议承诺项 + 验收结果"} state={meeting ? "warning" : "pending"} />
         {showTimesheet && <MetricCard label="月均有效工时" value={hours(memberDashboard?.summary.averageEffectiveHours)} note={hasTimesheet ? `${memberDashboard?.source.timesheetMonth} · 当前权限 ${memberDashboard?.summary.timesheetMappedMembers} 人 · 扣除午休、有薪加班与晚餐重叠` : memberDashboard?.source.timesheetNote || "飞书工时数据待回补"} state={hasTimesheet ? memberDashboard?.source.timesheetState === "ready" ? "ready" : "warning" : "pending"} />}
         <MetricCard label="组织活力" value={scoreText(meeting?.summary.vitalityScore)} note="会议推断 · 协作、行动兑现与复盘闭环；非绩效结论" state={meeting?.summary.vitalityScore !== null && meeting?.summary.vitalityScore !== undefined ? "warning" : "pending"} />
         <MetricCard label="人员热力值" value={scoreText(meeting?.summary.heatScore)} note="会议推断 · 任务密度、交付和风险信号" state={meeting?.summary.heatScore !== null && meeting?.summary.heatScore !== undefined ? "warning" : "pending"} />

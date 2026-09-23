@@ -91,16 +91,18 @@ function ComparisonChart({ channel }: { channel: OmnichannelRealtimeSeries }) {
   </article>;
 }
 
-export function OmnichannelRealtime({ data }: { data: OmnichannelRealtimeOverview | null }) {
-  if (!data) return <section className="omni-realtime omni-is-empty"><strong>抖店、视频号实时 GSV 正在读取</strong><span>根数据暂未返回时不会用 0 补齐。</span></section>;
+export function OmnichannelRealtime({ data, onRefresh, refreshing, refreshError }: { data: OmnichannelRealtimeOverview | null; onRefresh: () => void; refreshing: boolean; refreshError: string }) {
+  const refreshButton = <button className="omni-refresh-button" type="button" onClick={onRefresh} disabled={refreshing} aria-label="刷新抖店、视频号 GSV 数据">{refreshing ? "刷新中…" : "↻ 刷新"}</button>;
+  if (!data) return <section className="omni-realtime omni-is-empty"><div className="omni-empty-copy"><strong>抖店、视频号实时 GSV 正在读取</strong><span>{refreshError || "根数据暂未返回时不会用 0 补齐。"}</span></div>{refreshButton}</section>;
   return <section className="omni-realtime">
     <header className="omni-section-head">
       <div><span>GSV · BUSINESS DATE COMPARISON</span><h2>抖店、视频号 GSV 时段对比</h2><p>按下方实际业务日期展示累计 GSV；对比和折线只比较已完整结束的小时，当前小时不参与。</p></div>
       <div className="omni-total"><small>{combinedBusinessDateLabel(data.channels)} · 部门全渠道有效 GSV</small><strong>{wan(data.summary.departmentTodayGsvYuan)}</strong><em>抖店＋视频号</em></div>
-      <i><b />5分钟自动更新</i>
+      <div className="omni-refresh-actions"><i><b />5分钟自动更新</i>{refreshButton}</div>
     </header>
     <div className="omni-live-grid">{data.channels.map((channel) => <RealtimeChannelCard channel={channel} key={channel.key} />)}</div>
     <div className="omni-chart-grid">{data.channels.map((channel) => <ComparisonChart channel={channel} key={channel.key} />)}</div>
+    {refreshError && <p className="omni-refresh-error" role="status">{refreshError}</p>}
     <footer className="omni-definition"><strong>统一口径</strong><span>{data.definitions.departmentPerformance} {data.definitions.qianchuanAttribution} {data.definitions.spendCoverage}</span>{data.status === "stale" && <em>当前展示最近成功快照</em>}</footer>
   </section>;
 }

@@ -1,13 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {blockText,messageText,safeSourceId} from './server-source-refresh.mjs';
+import {meetingDocumentReference} from './server-source-refresh.mjs';
 
-test('extracts only literal Feishu text and stable source identity',()=>{
-  const block={block_id:'abc',block_type:2,paragraph:{elements:[
-    {text_run:{content:'昨日新增'}},{text_run:{content:'素材反馈'}}]}};
-  assert.equal(blockText(block),'昨日新增素材反馈');
-  assert.equal(messageText({msg_type:'text',body:{content:JSON.stringify({text:' 原文 '})}}),'原文');
-  assert.equal(messageText({msg_type:'image',body:{content:'{}'}}),'');
-  assert.equal(safeSourceId('chat','a','b'),safeSourceId('chat','a','b'));
-  assert.notEqual(safeSourceId('chat','a','b'),safeSourceId('chat','a','c'));
+test('meeting source reader accepts only Feishu document URLs linked from reviewed meeting records',()=>{
+  assert.deepEqual(meetingDocumentReference('https://www.feishu.cn/docx/WyKEd6m2Mo0EIlx646bcPNlRnvk'),
+    {type:'docx',token:'WyKEd6m2Mo0EIlx646bcPNlRnvk'});
+  assert.deepEqual(meetingDocumentReference('https://www.feishu.cn/wiki/LW5MwceaTiLlc8kmrqXc9BKInjc'),
+    {type:'wiki',token:'LW5MwceaTiLlc8kmrqXc9BKInjc'});
+  assert.equal(meetingDocumentReference('https://applink.feishu.cn/client/calendar/event/detail?key=abc'),null);
+  assert.equal(meetingDocumentReference('https://www.feishu.cn.evil.example/docx/abc'),null);
+  assert.equal(meetingDocumentReference('https://www.feishu.cn@evil.example/docx/abc'),null);
+  assert.equal(meetingDocumentReference('http://www.feishu.cn/docx/abc'),null);
 });

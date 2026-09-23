@@ -39,8 +39,8 @@ export function validateSourceData(key,data){
  check(ORGANIZATION_SOURCE_KEYS.includes(key)&&object(data),'Invalid source payload');
  noCredentials(data);
  check(data.factsDate===null||date(data.factsDate),'Payload factsDate must be an explicit date or null');
- check(object(data.sourceMetadata)&&data.sourceMetadata.identity==='user'
-   &&timestamp(data.sourceMetadata.readAt)&&https(data.sourceMetadata.sourceUrl),'Source requires verified user-read provenance');
+ check(object(data.sourceMetadata)&&['user','application'].includes(data.sourceMetadata.identity)
+   &&timestamp(data.sourceMetadata.readAt)&&https(data.sourceMetadata.sourceUrl),'Source requires verified read provenance');
  check(HASH.test(data.sourceMetadata.rawSha256),'Missing/invalid original-source hash');
  fieldsExactly(data.sourceMetadata,['identity','readAt','sourceUrl','rawSha256','documentId','appToken','tableId','fieldIds','revision']);
  if(key==='organization'){
@@ -61,7 +61,8 @@ export function validateSourceData(key,data){
    ids.add(item.id);
    for(const name of ['minutesUrl','transcriptUrl'])check(item[name]==null||https(item[name]),'Invalid meeting source link');
    if(item.readState==='readable')check(evidence(item.readEvidence)
-     &&item.readEvidence.sourceUrl===item.transcriptUrl,'A source link alone does not prove this transcript readability');
+     &&[item.transcriptUrl,item.minutesUrl].includes(item.readEvidence.sourceUrl),
+     'A source link alone does not prove meeting document readability');
   }
   const count=counters(data.items);
   for(const [key,value] of Object.entries(count))if(data[key]!==undefined)check(data[key]===value,'Meeting coverage differs from per-record read evidence');

@@ -673,7 +673,7 @@ export type OrganizationDashboardOverview = {
       channel: string;
       center: string;
       owner: string;
-      reports: Array<{ title: string; url: string }>;
+      reports: Array<{ title: string; url: string; collection?: { state: string; readAt: string; factsDate: string | null; excerpt?: string; error?: string } }>;
       dashboards: Array<{ title: string; url: string }>;
       state?: "ready" | "partial" | "pending";
       note?: string;

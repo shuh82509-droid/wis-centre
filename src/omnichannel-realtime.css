@@ -10,3 +10,4 @@
 .omni-realtime .omni-change-up{color:#b42318}
 .omni-realtime .omni-change-down{color:#08745d}
 .omni-realtime .omni-change-neutral{color:#66717b}
+.omni-refresh-actions{display:flex;align-items:center;gap:10px}.omni-refresh-actions>i{display:flex;align-items:center;gap:6px;padding:6px 9px;border-radius:99px;background:#eff8f5;color:#47776c;font-size:10px;font-style:normal}.omni-refresh-actions>i b{width:6px;height:6px;border-radius:50%;background:#22a978}.omni-refresh-button{border:1px solid #a8c9dc;border-radius:9px;background:#fff;color:#0c547c;padding:7px 12px;font:inherit;font-size:12px;font-weight:700;cursor:pointer}.omni-refresh-button:hover{background:#ecf7fd}.omni-refresh-button:disabled{opacity:.55;cursor:wait}.omni-empty-copy{display:flex;flex-direction:column;align-items:center;gap:9px}.omni-is-empty{gap:16px}.omni-refresh-error{margin:0;color:#a23e21;font-size:12px}
