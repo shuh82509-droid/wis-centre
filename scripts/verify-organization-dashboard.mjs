@@ -8,6 +8,7 @@ import { join, resolve } from "node:path";
 const calls = { manager: 0, director: 0, leader: 0, center: 0, personal: 0, blocked: 0, maintainer: 0, emptyDirector: 0 };
 const realtimeCalls = { manager: 0, director: 0, leader: 0, center: 0, personal: 0, blocked: 0, maintainer: 0, emptyDirector: 0 };
 const memberCalls = { manager: 0, director: 0, leader: 0, center: 0, personal: 0, blocked: 0, maintainer: 0, emptyDirector: 0 };
+const centralDefaultModules = ["data-dashboard", "creative-hub", "ai-first-creation", "material-workbench", "cloud-manager", "live-room-management"];
 
 function memberPayload(role) {
   const allMembers = [
@@ -83,37 +84,42 @@ function sessionFor(role) {
   if (role === "manager") return {
     user: { number: "FD-026222", realName: "舒豪", department: "品牌营销部", center: "AI营销中心" },
     permissions: { manage_permissions: true, super_admin: false },
-    access: { allowed_modules: ["data-dashboard", "creative-hub", "ai-first-creation", "material-workbench", "cloud-manager", "live-room-management"] },
+    access: { allowed_modules: centralDefaultModules },
   };
   if (role === "center") return {
     user: { number: "FD-023794", realName: "李雨橦", department: "品牌营销部", center: "品牌创意中心" },
     permissions: { manage_permissions: false, super_admin: false },
-    access: { allowed_modules: ["data-dashboard", "creative-hub", "ai-first-creation", "material-workbench", "cloud-manager", "live-room-management"] },
+    access: { allowed_modules: centralDefaultModules },
   };
   if (role === "director") return {
     user: { number: "FD-DIRECTOR", realName: "赵佳乐", department: "品牌营销部" },
     permissions: { manage_permissions: false, super_admin: false },
-    access: { allowed_modules: ["data-dashboard"] },
+    access: { allowed_modules: centralDefaultModules },
   };
   if (role === "leader") return {
     user: { number: "FD-LEADER", realName: "吴为", department: "品牌营销部" },
     permissions: { manage_permissions: false, super_admin: false },
-    access: { allowed_modules: ["data-dashboard"] },
+    access: { allowed_modules: centralDefaultModules },
   };
   if (role === "personal") return {
     user: { number: "FD-PERSONAL", realName: "个人验收账号", department: "品牌营销部", center: "营销中心B" },
     permissions: { manage_permissions: false, super_admin: false },
-    access: { allowed_modules: ["data-dashboard", "creative-hub", "ai-first-creation", "material-workbench", "cloud-manager", "live-room-management"] },
+    access: { allowed_modules: centralDefaultModules },
   };
   if (role === "exception") return {
     user: { number: "FD-029613", realName: "李逸青", department: "品牌营销部", center: "营销中心D" },
     permissions: { manage_permissions: false, super_admin: false },
-    access: { allowed_modules: [] },
+    access: { allowed_modules: centralDefaultModules },
+  };
+  if (role === "explicitSelection") return {
+    user: { number: "FD-TEST-SELECTED", realName: "显式授权核验账号", department: "品牌营销部", center: "营销中心D" },
+    permissions: { manage_permissions: false, super_admin: false },
+    access: { allowed_modules: ["ai-first-creation", "cloud-manager"], access_mode: "selected", configured: true },
   };
   if (role === "unmapped") return {
     user: { number: "FD-UNMAPPED", realName: "待映射专员", department: "品牌营销部", center: "未分中心" },
     permissions: { manage_permissions: false, super_admin: false },
-    access: { allowed_modules: ["data-dashboard", "creative-hub", "ai-first-creation", "material-workbench", "cloud-manager", "live-room-management"] },
+    access: { allowed_modules: centralDefaultModules },
   };
   if (role === "maintainer") return {
     user: { number: "FD-MAINTAINER", realName: "许国杨", department: "信息技术部" },
@@ -123,7 +129,7 @@ function sessionFor(role) {
   if (role === "emptyDirector") return {
     user: { number: "FD-024031", realName: "练美好", department: "品牌营销部", center: "营销中心D" },
     permissions: { manage_permissions: false, super_admin: false },
-    access: { allowed_modules: ["data-dashboard", "creative-hub", "ai-first-creation", "material-workbench", "cloud-manager", "live-room-management"] },
+    access: { allowed_modules: centralDefaultModules },
   };
   return {
     user: { number: "FD-BLOCKED", realName: "外部旧授权账号", department: "销售部" },
@@ -141,7 +147,12 @@ function send(response, status, payload) {
 const authority = createServer((request, response) => {
   const role = roleFrom(request);
   if (request.url === "/api/central-auth/me") return send(response, 200, sessionFor(role));
-  if (request.url?.startsWith("/api/admin/workspace-profiles")) return send(response, 200, { items: [] });
+  if (request.url?.startsWith("/api/admin/workspace-profiles")) return send(response, 200, { items: [
+    { user_number: "FD-024035", real_name: "曾泳淇", department: "品牌营销部", center: "直播中心", login_active: true,
+      effective_modules: centralDefaultModules, module_configured: false, module_access_mode: "all" },
+    { user_number: "FD-023375", real_name: "刘文轩", department: "品牌营销部", center: "营销中心B", login_active: true,
+      effective_modules: centralDefaultModules, module_configured: false, module_access_mode: "all" },
+  ] });
   if (request.url?.startsWith("/api/admin/module-access")) return send(response, 200, {
     items: [
       { identifier: "FD-023794", real_name: "李雨橦", user_number: "FD-023794", department: "品牌营销部", center: "品牌创意中心" },
@@ -276,14 +287,16 @@ try {
   assert.equal(leaderSession.payload.workspace.role, "manager");
   assert.equal(leaderSession.payload.workspace.center, "AI营销中心");
   assert.equal(leaderSession.payload.workspace.dashboard_scope, "center");
+  assert.deepEqual(leaderSession.payload.access.allowed_modules, centralDefaultModules);
 
   const personalSession = await sessionOnce("personal");
   assert.equal(personalSession.payload.workspace.role, "specialist");
   assert.equal(personalSession.payload.workspace.home, "personal");
   assert.equal(personalSession.payload.workspace.can_view_organization_dashboard, false);
-  assert.deepEqual(personalSession.payload.access.allowed_modules, ["ai-first-creation", "material-workbench", "cloud-manager", "creative-radar"]);
-  const deniedPersonalModule = await fetch(`http://127.0.0.1:${hubPort}/api/launch/data-dashboard`, { method: "HEAD", headers: headersFor("personal"), redirect: "manual" });
-  assert.equal(deniedPersonalModule.status, 403);
+  assert.deepEqual(personalSession.payload.access.allowed_modules, centralDefaultModules, "未单独配置的部门成员使用中央全业务模块权限");
+  assert.equal(personalSession.payload.workspace.module_policy_state, "central-default-modules");
+  const defaultPersonalModule = await fetch(`http://127.0.0.1:${hubPort}/api/launch/data-dashboard`, { method: "HEAD", headers: headersFor("personal"), redirect: "manual" });
+  assert.equal(defaultPersonalModule.status, 204);
   const allowedPersonalModule = await fetch(`http://127.0.0.1:${hubPort}/api/launch/ai-first-creation`, { method: "HEAD", headers: headersFor("personal"), redirect: "manual" });
   assert.equal(allowedPersonalModule.status, 204);
   const specialistAssistantStatus = await fetch(`http://127.0.0.1:${hubPort}/api/assistant/status`, { headers: headersFor("personal") });
@@ -300,13 +313,20 @@ try {
 
   const exceptionSession = await sessionOnce("exception");
   assert.equal(exceptionSession.payload.workspace.role, "specialist");
-  assert.equal(exceptionSession.payload.workspace.module_policy_state, "mapped-exception");
-  assert.equal(exceptionSession.payload.access.allowed_modules.length, 8, "the legacy all-business mapping includes the new workflow module until an explicit selection is saved");
-  assert.ok(exceptionSession.payload.access.allowed_modules.includes("workflow-engine"));
+  assert.equal(exceptionSession.payload.workspace.module_policy_state, "central-default-modules");
+  assert.deepEqual(exceptionSession.payload.access.allowed_modules, centralDefaultModules, "旧个人映射不能缩窄或扩张中央默认模块");
+
+  const explicitSelection = await sessionOnce("explicitSelection");
+  assert.equal(explicitSelection.payload.workspace.module_policy_state, "admin-configured-modules");
+  assert.deepEqual(explicitSelection.payload.access.allowed_modules, ["ai-first-creation", "cloud-manager"], "中央显式选择仍保持原例外，不自动补成全模块");
+  const deniedSelectedModule = await fetch(`http://127.0.0.1:${hubPort}/api/launch/data-dashboard`, { method: "HEAD", headers: headersFor("explicitSelection"), redirect: "manual" });
+  assert.equal(deniedSelectedModule.status, 403);
+  const allowedSelectedModule = await fetch(`http://127.0.0.1:${hubPort}/api/launch/ai-first-creation`, { method: "HEAD", headers: headersFor("explicitSelection"), redirect: "manual" });
+  assert.equal(allowedSelectedModule.status, 204);
 
   const unmappedSession = await sessionOnce("unmapped");
-  assert.equal(unmappedSession.payload.workspace.module_policy_state, "unmapped");
-  assert.deepEqual(unmappedSession.payload.access.allowed_modules, ["creative-radar"], "an unmapped brand-department member receives only the department-wide module");
+  assert.equal(unmappedSession.payload.workspace.module_policy_state, "central-default-modules");
+  assert.deepEqual(unmappedSession.payload.access.allowed_modules, centralDefaultModules, "未映射中心不应二次裁剪中央模块");
 
   const maintainerSession = await sessionOnce("maintainer");
   assert.equal(maintainerSession.payload.workspace.role, "director");
@@ -316,7 +336,7 @@ try {
 
   const emptyDirectorSession = await sessionOnce("emptyDirector");
   assert.equal(emptyDirectorSession.payload.workspace.role, "director");
-  assert.deepEqual(emptyDirectorSession.payload.access.allowed_modules, ["creative-radar"], "blank mapping remains closed except for the department-wide module");
+  assert.deepEqual(emptyDirectorSession.payload.access.allowed_modules, centralDefaultModules, "负责人空旧映射不覆盖中央默认模块");
   const emptyDirectorDashboard = await overviewOnce("emptyDirector");
   assert.equal(emptyDirectorDashboard.response.status, 200, "organization access is separate from the six business-module grants");
 
@@ -365,6 +385,7 @@ try {
   assert.equal(calls.manager, 1, "department scope should receive the shared root-data aggregate");
   assert.equal(realtimeCalls.manager, 1, "department scope should receive the shared realtime facts");
 
+  assert.deepEqual((await sessionOnce("director")).payload.access.allowed_modules, centralDefaultModules);
   const director = await overview("director");
   assert.equal(director.response.status, 200);
   assert.equal(director.payload.access.scope, "department", "赵佳乐 should inherit department scope from the organization map");
@@ -407,6 +428,7 @@ try {
   assert.ok(previewCandidatesPayload.items.some((item) => item.userNumber === "FD-024035" && item.realName === "曾泳淇"));
   const liuWenxuan = previewCandidatesPayload.items.find((item) => item.userNumber === "FD-023375");
   assert.equal(liuWenxuan?.realName, "刘文轩");
+  assert.deepEqual(liuWenxuan?.allowedModules, centralDefaultModules, "权限预览以中央生效模块为准，不沿用中心旧表");
   assert.equal(liuWenxuan?.allowedModules.includes("creative-radar"), false, "preview must not insert an unconfigured module");
 
   const personalPreviewUpdate = await fetch(`http://127.0.0.1:${hubPort}/api/permission-preview`, {
@@ -419,7 +441,7 @@ try {
   assert.equal(personalPreviewPayload.label, "专员级 · 曾泳淇");
   assert.equal(personalPreviewPayload.subject.userNumber, "FD-024035");
   assert.equal(personalPreviewPayload.subject.center, "直播中心");
-  assert.deepEqual(personalPreviewPayload.subject.allowedModules, ["live-room-management"]);
+  assert.deepEqual(personalPreviewPayload.subject.allowedModules, centralDefaultModules, "部门成员预览应读取中央全模块权限");
   const previewedPersonal = await overview("manager");
   assert.equal(previewedPersonal.payload.access.scope, "personal");
   assert.equal(previewedPersonal.payload.access.personName, "曾泳淇");
