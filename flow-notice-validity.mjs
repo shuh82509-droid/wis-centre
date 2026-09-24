@@ -1,6 +1,13 @@
 // Verify the current round and recipient immediately before acquiring a send
 // lease. An old return/overdue event must not notify the previous assignee.
 export function currentNodeNotice(notice,task,node,now){
+  if(notice.kind==='live_tomorrow'){
+    const slot=task?.runtime?.liveSession;
+    const local=new Date(now+8*3600000),tomorrow=new Date(now+8*3600000+86400000).toISOString().slice(0,10);
+    return local.getUTCHours()>=16&&notice.businessDate===tomorrow&&slot?.date===tomorrow&&slot.signature===notice.signature&&
+      !slot.sourceIssue&&task.runtime.state==='running'&&['pending','ready'].includes(node?.state)&&
+      node.attempt===notice.attempt&&node.owner.number===notice.recipient;
+  }
   if(['live_assignment','live_today'].includes(notice.kind)){
     const slot=task?.runtime?.liveSession;
     if(!slot||slot.sourceIssue||task.runtime.state!=='running'||!['pending','ready'].includes(node?.state)||node.attempt!==notice.attempt||node.owner.number!==notice.recipient)return false;

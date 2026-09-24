@@ -46,6 +46,7 @@ test('acknowledgement and exception preserve pending execution and notify only m
   assert.equal((await f.actions.handle(f.event(messageId))).status,'acknowledged');
   await f.actions.handle(f.event(messageId));
   const n=f.task.runtime.nodes.find(n=>n.id==='W04.S4.E1');assert.equal(n.state,'pending');assert.equal(n.liveAcknowledgements.length,1);
+  assert.equal(n.liveAcknowledgements[0].attempt,n.attempt);assert.equal(n.liveAcknowledgements[0].by,n.owner.number);
   await f.actions.handle(f.event(messageId,'live_issue',{note:'设备异常，申请协助'}));
   assert.equal(f.store.read().flowNotifications.length,before+1);assert.equal(f.store.read().flowNotifications.at(-1).recipient,'M');
 });
@@ -72,6 +73,8 @@ test('card content has no hub URL, credentials or cross-person actions and respe
   let card=liveFeishuCard(notice,f.task),encoded=JSON.stringify(card);
   assert.equal(card.schema,'2.0');assert.equal(card.config.enable_forward,false);assert.ok(!encoded.includes('workflow-panorama'));assert.ok(!encoded.includes('live_complete'));assert.ok(encoded.includes('live_ack'));
   await f.ready();card=liveFeishuCard(notice,f.task);assert.ok(JSON.stringify(card).includes('actualStart'));assert.ok(card.body.elements.length<=5);
+  const cohostTask=structuredClone(f.task);cohostTask.runtime.liveSession.cohostDisplay='曹总（老板场）';
+  assert.match(JSON.stringify(liveFeishuCard(notice,cohostTask)),/共播：曹总/);
   const names=[];const walk=v=>{if(!v||typeof v!=='object')return;if(v.name)names.push(v.name);for(const x of Object.values(v))if(Array.isArray(x))x.forEach(walk);else if(x&&typeof x==='object')walk(x);};walk(card);assert.equal(names.length,new Set(names).size,'all card form field names must be globally unique');
   const ack=await f.actions.handle(f.event(id));
   assert.ok(JSON.stringify(ack.card).includes('live_complete'),'acknowledgement must not hide ready completion');

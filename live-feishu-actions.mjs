@@ -51,7 +51,7 @@ export class LiveFeishuActions {
         requireFact(t.version===task.version&&n.attempt===notice.attempt,'任务刚刚变化，请重新办理',409);
         n.liveAcknowledgements??=[];
         if(!n.liveAcknowledgements.some(x=>x.key===key)){
-          n.liveAcknowledgements.push({key,hash,kind:event.action,at:r.iso(),by:actor.user.number,note});
+          n.liveAcknowledgements.push({key,hash,kind:event.action,attempt:n.attempt,at:r.iso(),by:actor.user.number,note});
           const log=r.log(store,t,n,event.action,actor.user,note);
           if(event.action==='live_issue')r.notify(store,t,n,'live_participant_issue',t.runtime.manager.number,log.id);
           t.version++;

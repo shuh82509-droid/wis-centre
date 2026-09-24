@@ -16,6 +16,13 @@ const confirmedRosterNames=Object.freeze({
   '谷子晴(金牌导购)':'谷子晴','谷子晴（金牌导购）':'谷子晴',
   '邓淑环(金牌导购)':'邓淑环','邓淑环（金牌导购）':'邓淑环',
 });
+// These exact labels occur in the live official room tabs. The base names
+// have unique active live-center directory matches; do not strip arbitrary
+// parentheses or treat a room assignment as a new account permission.
+const officialRoomRoleNames=Object.freeze({
+  brand_selection:Object.freeze({'陈璐（销冠）':'陈璐','王思佳（福利官）':'王思佳','李楚晴（福利官）':'李楚晴','罗梓欣（销冠）':'罗梓欣'}),
+  wangou:Object.freeze({'刘睿（金牌导购）':'刘睿'}),
+});
 const stageFor=id=>id.startsWith('W04.S2.')?0:id==='W04.S3.E1'?1:id==='W04.S3.E2'?2:id.startsWith('W04.S4.')?3:4;
 const dateAt=ms=>new Date(ms+8*3600000).toISOString().slice(0,10);
 function validDate(date){return /^20\d{2}-\d{2}-\d{2}$/.test(date)&&dateAt(Date.parse(date+'T00:00:00+08:00'))===date;}
@@ -28,19 +35,24 @@ function timeline(rows,date){
     const start=minute(row[0]),end=minute(row[1]);if(start<previous)offset+=1440;previous=start;
     const from=start+offset,to=end+offset+(end<start?1440:0);
     requireFact(to>from&&to-from<=1440&&to<=2880,'班次顺序或跨日时间无法核验',409);
-    return {startAt:new Date(base+from*60000).toISOString(),endAt:new Date(base+to*60000).toISOString(),name:text(row[2],80)};
+    return {startAt:new Date(base+from*60000).toISOString(),endAt:new Date(base+to*60000).toISOString(),name:text(row[2],80),...(row[3]?{cohostDisplay:text(row[3],80)}:{})};
   });
 }
 // This adapter consumes the existing dispatch response, never browser-submitted
 // people or a last-good snapshot masquerading as a current schedule.
 export function scheduleSessions(raw,date,people,now=Date.now(),participants=null){
   requireFact(validDate(date)&&raw?.date===date,'班表业务日期不一致',409);
+  // A partly parsed room is not an approved subset of the formal schedule.
+  // Block that room (or every room for a source-wide issue) before resolving
+  // people or creating any work from it. Other fully verified rooms may run.
+  const selectedRooms=new Set((raw.rooms||[]).map(room=>room.code));
+  requireFact(!(raw.issues||[]).some(issue=>!issue?.roomCode||selectedRooms.has(issue.roomCode)),'直播间正式班表存在未核验班次，暂停本房间派工',409);
   const age=now-Date.parse(raw.updatedAt);
   requireFact(Number.isFinite(age)&&age>=-60000&&age<=15*60000,'班表读取时间过期，需刷新真实来源后派工',409);
   const direct=raw.source?.mode==='official_live'&&raw.source?.verified===true&&raw.source?.spreadsheetToken==='EuYqssm4WhNwAvtyybKcDdk1ned';
   requireFact(!raw.recovery&&!raw.source?.mode?.includes('backup')&&(direct||raw.writebackCapability?.enabled===true),'当前班表仍为只读恢复来源，不能据此自动派工',409);
-  const resolve=name=>{
-    const fullName=direct?confirmedRosterNames[name]||name:name;
+  const resolve=(name,roomCode)=>{
+    const fullName=direct?confirmedRosterNames[name]||officialRoomRoleNames[roomCode]?.[name]||name:name;
     const matches=people.filter(p=>p.active&&p.name===fullName&&(!direct||p.center==='直播中心')&&((p.workflowEnabled!==false&&p.modules?.includes('live-room-management')&&p.modules?.includes('workflow-engine'))||(direct&&participants?.verified(p.number))));
     requireFact(matches.length===1,`${name||'未命名人员'} 尚无唯一有效的直播或飞书参与人身份`,409);return matches[0].number;
   };
@@ -54,11 +66,27 @@ export function scheduleSessions(raw,date,people,now=Date.now(),participants=nul
       const overlaps=assistants.filter(s=>Date.parse(s.startAt)<end&&Date.parse(s.endAt)>start).sort((a,b)=>Date.parse(a.startAt)-Date.parse(b.startAt));
       let covered=start;for(const s of overlaps){requireFact(Date.parse(s.startAt)<=covered,'主播班次存在助理空档，请先确认排班',409);covered=Math.max(covered,Date.parse(s.endAt));}
       requireFact(covered>=end,'主播班次没有完整助理覆盖，请先确认排班',409);
-      const slot={date,roomCode:room.code,roomName:room.name,startAt:shift.startAt,endAt:shift.endAt,anchor:resolve(shift.name),assistants:[...new Set(overlaps.map(s=>resolve(s.name)))],source:{revision:src.revision,sheetId:src.sheetId,readAt:raw.updatedAt}};
+      const anchor=resolve(shift.name,room.code);
+      const assistantShifts=overlaps.map(s=>({
+        number:resolve(s.name,room.code),startAt:s.startAt,endAt:s.endAt,
+        overlapStartAt:new Date(Math.max(start,Date.parse(s.startAt))).toISOString(),
+        overlapEndAt:new Date(Math.min(end,Date.parse(s.endAt))).toISOString()
+      }));
+      const resolvedAssistants=[...new Set(assistantShifts.map(s=>s.number))];
+      // An OA account alone cannot receive or action the approved Feishu card.
+      // The formal sheet must not produce work that its scheduled people cannot
+      // acknowledge without logging into the hub.
+      if(direct)requireFact(participants?.canOwn(anchor,'W04.S4.E1')&&resolvedAssistants.every(number=>participants.canOwn(number,'W04.S4.A1')),
+        '主播或助理尚未完成本人飞书卡片身份绑定，暂停本直播间派工与次日通知',409);
+      const slot={date,roomCode:room.code,roomName:room.name,startAt:shift.startAt,endAt:shift.endAt,anchor,assistants:resolvedAssistants,assistantShifts,...(shift.cohostDisplay?{cohostDisplay:shift.cohostDisplay}:{}),source:{revision:src.revision,sheetId:src.sheetId,readAt:raw.updatedAt}};
       slot.key='live:'+fingerprint([slot.roomCode,slot.date,slot.startAt,slot.endAt]).slice(0,40);
       // Unrelated edits increment the workbook revision too. Bind consent to
       // this slot's actual people/times/sheet; retain revision as audit evidence.
-      slot.signature=fingerprint({...slot,source:{sheetId:src.sheetId}});
+      // Keep existing formal tasks' signatures stable. Assistant-specific
+      // intervals are separately bound to each next-day notice, so their
+      // correction cannot turn a pending message into wrong-time guidance.
+      const {assistantShifts:_assistantShifts,...signatureFields}=slot;
+      slot.signature=fingerprint({...signatureFields,source:{sheetId:src.sheetId}});
       sessions.push(slot);
     }
   }
@@ -86,9 +114,9 @@ export function validateLiveCompletion(task,node,body,store,now){
 export class LiveSessionFlow {
   constructor(runtime,{readSchedule,clock=Date.now,leads=roomLeads,enabled=false}){this.runtime=runtime;this.readSchedule=readSchedule;this.clock=clock;this.leads=leads;this.enabled=enabled;}
   check(a,manage=false){requireFact(a.enabled&&!a.configurationOnly&&flowAllowed(a,'04')&&(!manage||a.canManage),'没有当前直播工作流操作权限',403);}
-  async preview(a,req,date){
+  async preview(a,req,date,{fresh=false}={}){
     this.check(a,true);requireFact(validDate(date),'日期格式无效');requireFact(this.readSchedule,'正式班表读取尚未配置',503);
-    const people=this.runtime.people(),raw=await this.readSchedule(req,date),issues=[...(raw.issues||[])],sessions=[];
+    const people=this.runtime.people(),raw=await this.readSchedule(req,date,{fresh}),issues=[...(raw.issues||[])],sessions=[];
     for(const room of raw.rooms||[]){try{sessions.push(...scheduleSessions({...raw,rooms:[room]},date,people,this.clock(),this.runtime.liveParticipants));}catch(e){issues.push({roomCode:room.code,roomName:room.name,message:e.message});}}
     const cancelled=this.runtime.store.read().tasks.filter(t=>t.runtime?.liveSession?.date===date&&t.runtime.state==='cancelled'&&!t.runtime.liveSession.replacedBy&&runVisible(t,a));
     return {date,stages:liveStages,issues,sessions:sessions.map(s=>({...s,anchorName:people.find(p=>p.number===s.anchor)?.name,assistantNames:s.assistants.map(number=>people.find(p=>p.number===number)?.name),roomLead:this.leads[s.roomCode],cancelledTasks:cancelled.filter(t=>t.runtime.liveSession.roomCode===s.roomCode).map(t=>({id:t.id,version:t.version,title:t.title,sessionKey:t.runtime.liveSession.key,taskUrl:this.runtime.taskUrl(t.id)}))}))};
@@ -97,7 +125,7 @@ export class LiveSessionFlow {
     this.check(a,true);requireFact(this.enabled,'直播场次派工尚未启用，先完成来源与真实收件验收',409);requireFact(typeof key==='string'&&key.length>=8&&key.length<=128,'缺少防重复提交编号');
     const r=this.runtime,dedupeKey=a.user.number+':live:'+key,hash=fingerprint(b),old=r.store.read().flowDedupe?.[dedupeKey];
     if(old){requireFact(old.hash===hash,'重复提交内容不一致',409);const previous=r.get(a,old.taskId);requireFact(previous.runtime.state!=='cancelled','原任务已终止；如需重新派工，请明确选择被替代的原任务并记录原因',409);return previous;}
-    const slot=(await this.preview(a,req,b.date)).sessions.find(s=>s.key===b.sessionKey);
+    const slot=(await this.preview(a,req,b.date,{fresh:true})).sessions.find(s=>s.key===b.sessionKey);
     requireFact(slot&&slot.signature===b.signature,'班表已变化，请重新预览本班次',409);
     requireFact(Date.parse(slot.endAt)>this.clock(),'已结束的计划班次不能补发开播任务',409);
     if(b.replacesTaskId){
@@ -109,6 +137,8 @@ export class LiveSessionFlow {
       requireFact(text(b.note).length>=4,'请记录终止后重新派工的原因');
     }
     const confirmedLead=this.leads[slot.roomCode];requireFact(confirmedLead,'本直播间主负责人尚未确认',409);
+    requireFact(r.liveParticipants?.canOwn(slot.anchor,'W04.S4.E1')&&slot.assistants.every(number=>r.liveParticipants.canOwn(number,'W04.S4.A1')),
+      '主播或助理尚未完成本人飞书卡片身份绑定，不能创建无法由本人办理的正式场次',409);
     const lead=r.person(confirmedLead.number,a);requireFact(lead.name===confirmedLead.name,'直播间主负责人身份发生变化，请核验工号',409);
     const manager=r.person(a.user.number,a),bindings={
       'W04.S2.E1':lead.number,'W04.S2.E2':manager.number,'W04.S3.E1':lead.number,
@@ -186,7 +216,7 @@ export class LiveSessionFlow {
     const task=this.runtime.get(a,taskId);if(!task.runtime.liveSession)return;
     const slot=task.runtime.liveSession;
     requireFact(this.readSchedule,'正式班表读取尚未配置',503);
-    const raw=await this.readSchedule(req,slot.date);
+    const raw=await this.readSchedule(req,slot.date,{fresh:true});
     const current=scheduleSessions({...raw,rooms:(raw.rooms||[]).filter(room=>room.code===slot.roomCode)},slot.date,this.runtime.people(),this.clock(),this.runtime.liveParticipants).find(s=>s.key===slot.key);
     requireFact(current?.signature===slot.signature,'班次来源已变化，请由主管核对原任务；本次未完成或重复派工',409);
   }

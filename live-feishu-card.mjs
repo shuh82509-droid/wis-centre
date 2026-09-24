@@ -14,7 +14,7 @@ export function liveFeishuCard(notice, task, {receipt = null} = {}) {
   const active = task.runtime.state === 'running' && !slot.sourceIssue && ['pending','ready'].includes(node.state) && node.attempt === notice.attempt;
   const elements = [{tag:'column_set',flex_mode:'none',columns:[{tag:'column',width:'weighted',weight:1,background_style:'blue-50',padding:'12px',vertical_spacing:'4px',elements:[
     markdown(`**${escape(slot.roomName)} · ${escape(node.owner.name)}**`),
-    markdown(`计划班次：${escape(at(slot.startAt))} — ${escape(at(slot.endAt))}\n本人工作：${escape(node.title)}`),
+    markdown(`计划班次：${escape(at(slot.startAt))} — ${escape(at(slot.endAt))}${slot.cohostDisplay?`\n共播：${escape(slot.cohostDisplay)}（仅展示）`:''}\n本人工作：${escape(node.title)}`),
   ]}]}];
   elements.push(markdown(receipt ? escape(receipt) : ready ? '**当前可办理。** 请在实际工作完成后提交；计划时间不能作为实际时间。' : active ? '请确认收到排班。前置环节完成后会另行通知；确认收到不等于完成工作。' : '本通知已不可办理，请以最新通知和负责人说明为准。'));
   // An acknowledgement is not completion. Preserve the ability to report a

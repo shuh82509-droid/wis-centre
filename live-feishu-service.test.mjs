@@ -7,6 +7,8 @@ import {WorkflowStore} from './workflow-store.mjs';
 import {FlowRuntime} from './flow-runtime.mjs';
 import {FlowFeishu} from './flow-feishu.mjs';
 import {LiveFeishuService} from './live-feishu-service.mjs';
+import {scheduleSessions} from './live-session-flow.mjs';
+import {currentOfficialNextDaySource} from './live-next-day.mjs';
 const appId='cli_aa9c744d6ffa1cc4';
 async function fixture(t){
  const dir=mkdtempSync(join(tmpdir(),'live-service-'));t.after(()=>rmSync(dir,{recursive:true,force:true}));
@@ -15,10 +17,18 @@ async function fixture(t){
  const store=new WorkflowStore(join(dir,'tasks.json'));
  const fetchImpl=async(url,options)=>({ok:true,status:200,json:async()=>url.includes('/auth/')?{code:0,tenant_access_token:'test'}:url.includes('/contact/')?{code:0,data:{user:{open_id:'ou_test',name:'测试同事',department_ids:['od_test'],status:{is_activated:true,is_resigned:false,is_frozen:false,is_exited:false}}}}:(sent.push(JSON.parse(options.body)),{code:0,data:{message_id:'om_'+sent.length}})});
  const notifier=new FlowFeishu(store,{people:()=>[],clock:()=>now,fetchImpl,env:{FEISHU_APP_ID:appId,FEISHU_APP_SECRET:'test',FLOW_NOTIFICATIONS_ENABLED:'true'}});
- const runtime=new FlowRuntime(store,{people:()=>[],clock:()=>now});
- const service=new LiveFeishuService({runtime,notifier,clock:()=>now,liveSessions:{},env:{FLOW_LIVE_FEISHU_CARDS:'true',FLOW_LIVE_PARTICIPANTS_FILE:file}});
+ const people=[{number:'A',name:'测试同事',active:true,center:'直播中心',workflowEnabled:true,modules:['live-room-management','workflow-engine']}];
+ const runtime=new FlowRuntime(store,{people:()=>people,clock:()=>now});
+ const officialSheet=()=>({date:'2026-09-23',updatedAt:new Date(now).toISOString(),
+   source:{mode:'official_live',verified:true,spreadsheetToken:'EuYqssm4WhNwAvtyybKcDdk1ned'},
+   sourceStatus:{test:{found:true,revision:42,sheetId:'test-official-sheet'}},
+   rooms:[{code:'test',name:'测试间',anchors:[['09:00','12:00','测试同事']],assistants:[['09:00','12:00','测试同事']]}]});
+ const liveSessions={readSchedule:async(_request,date,{fresh}={})=>{assert.equal(fresh,true);assert.equal(date,'2026-09-23');return officialSheet();}};
+ const service=new LiveFeishuService({runtime,notifier,clock:()=>now,liveSessions,env:{FLOW_LIVE_FEISHU_CARDS:'true',FLOW_LIVE_PARTICIPANTS_FILE:file}});
  await service.participants.refresh();service.transport={ready:()=>connected,stop(){},status:()=>({state:connected?'connected':'idle'})};
- const task={id:'live_test',workflow:'04',title:'测试场',center:'直播中心',runtime:{state:'running',manager:{number:'M'},liveSession:{date:'2026-09-23',roomName:'测试间',startAt:'2026-09-23T01:00:00Z',endAt:'2026-09-23T04:00:00Z'},nodes:[{id:'W04.S4.E1',title:'直播执行',owner:{number:'A',name:'测试同事'},attempt:1,state:'pending'}]}};
+ notifier.verifyLiveNoticeSource=notice=>currentOfficialNextDaySource(notice,{runtime,liveSessions,clock:()=>now});
+ const slot=scheduleSessions(officialSheet(),'2026-09-23',people,now,service.participants)[0];
+ const task={id:'live_test',workflow:'04',title:'测试场',center:'直播中心',runtime:{state:'running',manager:{number:'M'},liveSession:slot,nodes:[{id:'W04.S4.E1',title:'直播执行',owner:{number:'A',name:'测试同事'},attempt:1,state:'pending'}]}};
  store.transaction(s=>{runtime.ensure(s);s.tasks.push(task);});
  return {service,store,notifier,sent,connect:v=>connected=v,advance:()=>{now+=60000;},setTime:v=>{now=Date.parse(v);}};
 }

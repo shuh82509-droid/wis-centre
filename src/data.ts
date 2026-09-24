@@ -1,7 +1,14 @@
 import type { AppModule } from "./types";
 
-const hubBasePath = String(import.meta.env.VITE_HUB_PUBLIC_BASE_PATH || "/yxb/wis-marketing-hub/")
+const officialHubBasePath = String(import.meta.env?.VITE_HUB_PUBLIC_BASE_PATH || "/yxb/wis-marketing-hub/")
   .replace(/\/+$/u, "");
+const candidateHubBasePath = `${officialHubBasePath}/live-flow-candidate-r55`;
+// Only the isolated r55 page embeds isolated modules. The normal Hub keeps
+// its existing module URLs, even when this same bundle is released formally.
+const hubBasePath = typeof window !== "undefined"
+  && window.location.pathname.startsWith(`${candidateHubBasePath}/`)
+  ? candidateHubBasePath
+  : officialHubBasePath;
 const modulePath = (path: string) => `${hubBasePath}/modules/${path}`;
 
 export const modules: AppModule[] = [
