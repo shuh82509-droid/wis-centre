@@ -108,7 +108,7 @@ export class FlowCreative {
    }catch(e){this.fail(w,e);results.push({source,recordId:w.recordId,state:'attention'});}
   }return results;
  }
- fail(w,error){const r=this.runtime;r.store.transaction(s=>{const row=s.creativeWatches?.find(x=>x.source===w.source&&x.recordId===w.recordId);if(!row)return true;const message=error.status?text(error.message,500):'来源读取失败，原任务和通知回执已保留';if(row.issue===message)return true;row.issue=message;row.checkedAt=r.iso();const t=s.tasks.find(t=>t.id===row.taskId);if(t){t.runtime.creative.issue=message;r.log(s,t,null,'creative_sync_attention',system,message);t.version++;}return true;});}
+ fail(w,error){const r=this.runtime,message=error.status?text(error.message,500):'来源读取失败，原任务和通知回执已保留';const prior=r.store.read().creativeWatches?.find(x=>x.source===w.source&&x.recordId===w.recordId);if(!prior||prior.issue===message)return;r.store.transaction(s=>{const row=s.creativeWatches?.find(x=>x.source===w.source&&x.recordId===w.recordId);if(!row||row.issue===message)return true;row.issue=message;row.checkedAt=r.iso();const t=s.tasks.find(t=>t.id===row.taskId);if(t){t.runtime.creative.issue=message;r.log(s,t,null,'creative_sync_attention',system,message);t.version++;}return true;});}
  repairLocalCompletion(s,t){
   const recipient=completionRecipient(t),r=this.runtime;
   if(!t.runtime.creative?.local||t.runtime.state!=='completed'||t.assignee.number!=='LOCAL-CREATIVE'||recipient==='LOCAL-CREATIVE')return;

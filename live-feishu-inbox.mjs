@@ -32,8 +32,13 @@ export class LiveFeishuInbox {
     if(this.running)return;this.running=true;
     const store=this.actions.runtime.store;
     try{for(let i=0;i<5;i++){
+      // The timer also runs with an empty queue. Reading first avoids a
+      // durable full-store write on every idle poll; claim again under the
+      // transaction lock because another callback may have changed the job.
+      const due=job=>(job.state==='ready'&&job.nextAt<=this.clock())||(job.state==='working'&&job.leaseUntil<=this.clock());
+      if(!Object.values(store.read().liveFeishuInbox||{}).some(due))break;
       const row=store.transaction(s=>{
-        const job=Object.values(s.liveFeishuInbox||{}).find(x=>(x.state==='ready'&&x.nextAt<=this.clock())||(x.state==='working'&&x.leaseUntil<=this.clock()));
+        const job=Object.values(s.liveFeishuInbox||{}).find(due);
         if(!job)return null;job.state='working';job.attempts++;job.leaseUntil=this.clock()+120000;return structuredClone(job);
       });
       if(!row)break;
