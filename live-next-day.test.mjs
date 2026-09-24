@@ -41,6 +41,30 @@ test('next-day messages are queued once; group confirms only after delivery and 
   f.advance();await f.job.tick();assert.equal(f.data.flowNotifications.filter(n=>n.kind!=='live_assignment').length,4);
 });
 
+test('16:00 reminder window ends at 17:00, including queued direct and group notices',async()=>{
+  const late=fixture();late.setNow('2026-09-24T23:59:00+08:00');
+  await late.job.tick();
+  assert.equal(late.data.flowNotifications.filter(n=>n.kind.startsWith('live_tomorrow')).length,0);
+
+  const f=fixture();await f.job.tick();
+  const direct=f.data.flowNotifications.find(n=>n.kind==='live_tomorrow');
+  assert.ok(currentNodeNotice(direct,f.data.tasks[0],f.nodes[0],f.now()));
+  f.data.flowNotifications.filter(n=>n.kind==='live_tomorrow').forEach((n,i)=>{
+    n.state='sent';n.messageId=`om_direct_${i}`;
+  });
+  f.advance();await f.job.tick();
+  const group=f.data.flowNotifications.find(n=>n.kind==='live_tomorrow_group_pending');
+  assert.ok(group&&currentNextDayGroup(group,f.data,f.now()));
+  f.nodes.forEach(n=>n.liveAcknowledgements=[{kind:'live_ack',attempt:n.attempt,by:n.owner.number,at:new Date(f.now()).toISOString()}]);
+  f.advance();await f.job.tick();
+  const confirmed=f.data.flowNotifications.find(n=>n.kind==='live_tomorrow_group_confirmed');
+  assert.ok(confirmed&&currentNextDayGroup(confirmed,f.data,f.now()));
+  f.setNow('2026-09-24T17:00:00+08:00');
+  assert.equal(currentNodeNotice(direct,f.data.tasks[0],f.nodes[0],f.now()),false);
+  assert.equal(currentNextDayGroup(group,f.data,f.now()),false);
+  assert.equal(currentNextDayGroup(confirmed,f.data,f.now()),false);
+});
+
 test('outdated date or changed official schedule invalidates unsent messages',async()=>{
   const f=fixture();await f.job.tick();
   const direct=f.data.flowNotifications.find(n=>n.kind==='live_tomorrow');
@@ -348,6 +372,17 @@ test('direct reminder is superseded if the owner, attempt or Feishu recipient ch
   }
 });
 
+test('token wait crossing 17:00 cannot POST an otherwise valid direct reminder',async()=>{
+  const f=fixture();await f.job.tick();
+  f.data.flowNotifications.find(n=>n.kind==='live_tomorrow'&&n.recipient==='B').state='superseded';
+  const direct=f.data.flowNotifications.find(n=>n.kind==='live_tomorrow'&&n.recipient==='A');
+  f.setNow('2026-09-24T16:59:59+08:00');
+  const sent=await flushAfterTokenWait(f,()=>f.setNow('2026-09-24T17:00:01+08:00'),
+    {map:{A:'ou_anchor'}});
+  assert.deepEqual(sent,[]);
+  assert.equal(direct.state,'superseded');
+});
+
 test('group confirmation is explicitly scoped to listed verified shifts if another room shift is added later',async()=>{
   const f=fixture();await f.job.tick();
   f.data.flowNotifications.filter(n=>n.kind==='live_tomorrow').forEach((n,i)=>{n.state='sent';n.messageId=`om_direct_${i}`;});
@@ -376,17 +411,22 @@ function managementReceipt(f,notice){
   assert.ok(runtime.overview(manager).metrics.notificationAttention>=1);
 }
 
-test('previously unknown group send becomes visible attention, never superseded or resent when acknowledgement changes during token wait',async()=>{
+test('previously unknown group send becomes visible attention without acquiring another token',async()=>{
   const f=fixture();await f.job.tick();
   f.data.flowNotifications.filter(n=>n.kind==='live_tomorrow').forEach((n,i)=>{n.state='sent';n.messageId=`om_direct_${i}`;});
   f.nodes.forEach(n=>n.liveAcknowledgements=[{kind:'live_ack',attempt:n.attempt,by:n.owner.number,at:new Date(f.now()).toISOString()}]);
   f.advance();await f.job.tick();
   const confirmed=f.data.flowNotifications.find(n=>n.kind==='live_tomorrow_group_confirmed');assert.ok(confirmed);
   confirmed.unknown=true;confirmed.firstAttemptAt=new Date(f.now()-60000).toISOString();
-  const sent=await flushAfterTokenWait(f,()=>{f.nodes[1].liveAcknowledgements=[];});
-  assert.deepEqual(sent,[]);assert.equal(confirmed.state,'attention');assert.equal(confirmed.unknown,true);
+  let tokenCalls=0,posts=0;
+  const sender=new FlowFeishu(f.job.runtime.store,{people:f.job.runtime.people,clock:f.now,
+    env:{FLOW_NOTIFICATIONS_ENABLED:'true',FEISHU_APP_ID:'test',FEISHU_APP_SECRET:'test',FLOW_LIVE_WAR_ROOM_CHAT_ID:'oc_3f92ef62d6160399ee823e74def199e6'},
+    fetchImpl:async()=>{posts++;throw Error('must not POST');}});
+  sender.tenantToken=async()=>{tokenCalls++;return 'token';};
+  await sender.flush();
+  assert.equal(tokenCalls,0);assert.equal(posts,0);
+  assert.equal(confirmed.state,'attention');assert.equal(confirmed.unknown,true);
   managementReceipt(f,confirmed);
-  const sender=new FlowFeishu(f.job.runtime.store,{people:f.job.runtime.people,clock:f.now,env:{FLOW_NOTIFICATIONS_ENABLED:'true',FEISHU_APP_ID:'test',FEISHU_APP_SECRET:'test',FLOW_LIVE_WAR_ROOM_CHAT_ID:'oc_3f92ef62d6160399ee823e74def199e6'},fetchImpl:async()=>{throw Error('must not retry')}});
   await sender.flush();assert.equal(confirmed.state,'attention');
 });
 
@@ -396,9 +436,8 @@ test('stale unknown ready notice and expired sending lease both remain attention
     const direct=f.data.flowNotifications.find(n=>n.kind==='live_tomorrow'&&n.recipient==='A');
     f.data.flowNotifications.find(n=>n.kind==='live_tomorrow'&&n.recipient==='B').state='superseded';
     direct.firstAttemptAt=new Date(f.now()-60000).toISOString();
-    if(prior==='unknown-ready'){direct.unknown=true;direct.state='ready';}
+    if(prior==='unknown-ready'){direct.unknown=true;direct.state='ready';direct.nextAt=f.now()+120000;}
     else{direct.state='sending';direct.leaseId='old-lease';direct.leaseUntil=f.now()-1;}
-    f.nodes[0].attempt++;
     let posts=0;
     const sender=new FlowFeishu(f.job.runtime.store,{people:f.job.runtime.people,clock:f.now,env:{FLOW_NOTIFICATIONS_ENABLED:'true',FEISHU_APP_ID:'test',FEISHU_APP_SECRET:'test',FEISHU_RECIPIENT_MAP_JSON:JSON.stringify({A:'ou_anchor',B:'ou_assistant'})},fetchImpl:async()=>{posts++;throw Error('must not send')}});
     await sender.flush();await sender.flush();
@@ -406,5 +445,82 @@ test('stale unknown ready notice and expired sending lease both remain attention
     assert.match(direct.error,/发送结果不明.*人工核验/,prior);
     assert.equal(direct.leaseId,undefined,prior);
     managementReceipt(f,direct);
+  }
+});
+
+test('unknown direct reminder near one-hour UUID boundary is held before token wait',async()=>{
+  const f=fixture();await f.job.tick();
+  f.data.flowNotifications.find(n=>n.kind==='live_tomorrow'&&n.recipient==='B').state='superseded';
+  const direct=f.data.flowNotifications.find(n=>n.kind==='live_tomorrow'&&n.recipient==='A');
+  f.setNow('2026-09-24T16:59:59+08:00');
+  direct.unknown=true;direct.firstAttemptAt=new Date(f.now()-3599000).toISOString();
+  let tokenCalls=0,posts=0;
+  const sender=new FlowFeishu(f.job.runtime.store,{people:f.job.runtime.people,clock:f.now,
+    env:{FLOW_NOTIFICATIONS_ENABLED:'true',FEISHU_APP_ID:'test',FEISHU_APP_SECRET:'test',FEISHU_RECIPIENT_MAP_JSON:JSON.stringify({A:'ou_anchor'})},
+    fetchImpl:async()=>{posts++;throw Error('must not POST');}});
+  sender.tenantToken=async()=>{tokenCalls++;f.setNow('2026-09-24T17:00:01+08:00');return 'token';};
+  await sender.flush();
+  assert.equal(tokenCalls,0);assert.equal(posts,0);
+  assert.equal(direct.state,'attention');assert.equal(direct.unknown,true);
+  f.data.tasks[0].runtime.participants=['A'];
+  assert.throws(()=>sender.retry({user:{number:'A'},canManage:true},direct.id),
+    /发送结果不明.*禁止重发/);
+});
+
+test('uncertain next-day transport result remains attention after the first POST',async()=>{
+  const f=fixture();await f.job.tick();
+  f.data.flowNotifications.find(n=>n.kind==='live_tomorrow'&&n.recipient==='B').state='superseded';
+  const direct=f.data.flowNotifications.find(n=>n.kind==='live_tomorrow'&&n.recipient==='A');
+  let posts=0;
+  const sender=new FlowFeishu(f.job.runtime.store,{people:f.job.runtime.people,clock:f.now,
+    env:{FLOW_NOTIFICATIONS_ENABLED:'true',FEISHU_APP_ID:'test',FEISHU_APP_SECRET:'test',FEISHU_RECIPIENT_MAP_JSON:JSON.stringify({A:'ou_anchor'})},
+    verifyLiveNoticeSource:notice=>currentOfficialNextDaySource(notice,{runtime:f.job.runtime,liveSessions:f.job.liveSessions,clock:f.now}),
+    fetchImpl:async()=>{posts++;throw Error('transport result unknown');}});
+  sender.tenantToken=async()=> 'token';
+  await sender.flush();
+  assert.equal(posts,1);assert.equal(direct.state,'attention');assert.equal(direct.unknown,true);
+  f.advance();await sender.flush();
+  assert.equal(posts,1);
+});
+
+test('success response without message ID is unknown and cannot retry any next-day notice kind',async()=>{
+  for(const kind of ['live_tomorrow','live_tomorrow_group_pending','live_tomorrow_group_confirmed']){
+    const f=fixture();await f.job.tick();
+    if(kind!=='live_tomorrow'){
+      f.data.flowNotifications.filter(n=>n.kind==='live_tomorrow').forEach((n,i)=>{
+        n.state='sent';n.messageId=`om_direct_${i}`;
+      });
+      f.advance();await f.job.tick();
+    }
+    if(kind==='live_tomorrow_group_confirmed'){
+      f.nodes.forEach(n=>n.liveAcknowledgements=[{
+        kind:'live_ack',attempt:n.attempt,by:n.owner.number,at:new Date(f.now()).toISOString()
+      }]);
+      f.advance();await f.job.tick();
+    }
+    const target=f.data.flowNotifications.find(n=>n.kind===kind);
+    assert.ok(target,kind);
+    for(const notice of f.data.flowNotifications){
+      if(notice!==target&&notice.state==='ready')notice.state='superseded';
+    }
+    let posts=0;
+    const sender=new FlowFeishu(f.job.runtime.store,{people:f.job.runtime.people,clock:f.now,
+      env:{FLOW_NOTIFICATIONS_ENABLED:'true',FEISHU_APP_ID:'test',FEISHU_APP_SECRET:'test',
+        FEISHU_RECIPIENT_MAP_JSON:JSON.stringify({A:'ou_anchor',B:'ou_assistant'}),
+        FLOW_LIVE_WAR_ROOM_CHAT_ID:'oc_3f92ef62d6160399ee823e74def199e6'},
+      verifyLiveNoticeSource:notice=>currentOfficialNextDaySource(notice,{
+        runtime:f.job.runtime,liveSessions:f.job.liveSessions,clock:f.now}),
+      fetchImpl:async()=>{posts++;return Response.json({code:0,data:{}});}});
+    sender.tenantToken=async()=> 'token';
+    await sender.flush();
+    assert.equal(posts,1,kind);
+    assert.equal(target.state,'attention',kind);
+    assert.equal(target.unknown,true,kind);
+    assert.ok(!target.messageId,kind);
+    await sender.flush();
+    assert.equal(posts,1,kind);
+    f.data.tasks[0].runtime.participants=['A'];
+    assert.throws(()=>sender.retry({user:{number:'A'},canManage:true},target.id),
+      /发送结果不明.*禁止重发/,kind);
   }
 });

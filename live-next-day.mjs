@@ -1,5 +1,6 @@
 import {randomUUID,createHash} from 'node:crypto';
 import {scheduleSessions} from './live-session-flow.mjs';
+import {withinNextDaySendWindow} from './flow-notice-validity.mjs';
 
 export const LIVE_WAR_ROOM_RECIPIENT='__wis_live_war_room__';
 const localDate=ms=>new Date(ms+8*3600000).toISOString().slice(0,10);
@@ -25,6 +26,7 @@ const assignedCard=(s,task,node,recipient)=>s.flowNotifications?.some(n=>
   n.recipient===recipient&&n.state==='sent'&&Boolean(n.messageId));
 const groupKey=(kind,date,room,refs)=>[kind,date,room,refs.map(x=>`${x.taskId}/${x.nodeId}/${x.attempt}/${x.recipient}/${x.signature}/${x.shiftFingerprint}`).join('|')].join(':');
 const nextDayKinds=new Set(['live_tomorrow','live_tomorrow_group_pending','live_tomorrow_group_confirmed']);
+export const isNextDayNotice=notice=>nextDayKinds.has(notice?.kind);
 // Source-change and exception notices must still reach the manager when the
 // sheet is unavailable. Every other formal live-task notice, including a
 // newly assigned node card, is bound to the current official shift.
@@ -47,7 +49,7 @@ const related=(s,slots)=>slots.flatMap(slot=>{
 });
 export function currentNextDayGroup(notice,s,now){
   if(!['live_tomorrow_group_pending','live_tomorrow_group_confirmed'].includes(notice.kind))return true;
-  if(localDate(now+86400000)!==notice.businessDate||localHour(now)<16||!notice.related?.length)return false;
+  if(localDate(now+86400000)!==notice.businessDate||!withinNextDaySendWindow(now)||!notice.related?.length)return false;
   const delivered=notice.related.every(ref=>{
     const task=s.tasks.find(t=>t.id===ref.taskId),node=task?.runtime.nodes.find(n=>n.id===ref.nodeId);
     const dm=node&&reminderFor(s,task,node,ref.recipient,notice.businessDate,ref.signature,ref.shiftFingerprint);
@@ -100,7 +102,7 @@ export class LiveNextDayReminder {
   }
   async tick(){
     const now=this.clock();
-    if(!this.enabled||this.running||now<this.nextAt||localHour(now)<this.sendHour)return;
+    if(!this.enabled||this.running||now<this.nextAt||localHour(now)<this.sendHour||!withinNextDaySendWindow(now))return;
     this.running=true;this.nextAt=now+300000;
     const date=localDate(now+86400000),issues=[];
     try{
@@ -128,6 +130,12 @@ export class LiveNextDayReminder {
           }
         }
         if(eligible)verifiedRooms.push(entry);
+      }
+      // Fresh source/identity checks may have crossed the end of the hour.
+      // Do not persist late notices that the sender must subsequently retire.
+      if(!withinNextDaySendWindow(this.clock())){
+        issues.push({message:'次日提醒发送窗口已过，本次不补发'});
+        return;
       }
       // One missing person's card blocks the whole room; a partial DM must
       // never imply that everyone can acknowledge the formal schedule.
