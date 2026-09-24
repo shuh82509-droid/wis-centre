@@ -60,6 +60,15 @@ test('morning reminders are durable, one per current node/day, and exclude pause
  f.store.transaction(s=>{s.tasks[0].runtime.state='paused';s.flowNotifications=[];});f.service.queueMorning();assert.equal(f.store.read().flowNotifications.length,0);
  f.store.transaction(s=>{s.tasks[0].runtime.state='running';s.tasks[0].runtime.liveSession.sourceIssue='changed';});f.service.queueMorning();assert.equal(f.store.read().flowNotifications.length,0);
 });
+test('08:00 morning card skips yesterday ended slots but keeps a real cross-midnight slot still running',async t=>{
+ const f=await fixture(t);f.setTime('2026-09-24T08:00:00+08:00');await f.service.participants.refresh();
+ f.store.transaction(s=>{const slot=s.tasks[0].runtime.liveSession;
+   slot.date='2026-09-23';slot.startAt='2026-09-23T14:00:00Z';slot.endAt='2026-09-23T22:00:00Z';});
+ f.service.queueMorning();assert.equal(f.store.read().flowNotifications.length,0);
+ f.store.transaction(s=>{s.tasks[0].runtime.liveSession.endAt='2026-09-24T01:00:00Z';});
+ f.service.queueMorning();assert.equal(f.store.read().flowNotifications.length,1);
+ assert.equal(f.store.read().flowNotifications[0].businessDate,'2026-09-24');
+});
 test('external staff receive interactive cards without hub link and callback receipt is stored',async t=>{
  const f=await fixture(t);f.service.queueMorning();await f.notifier.flush();
  assert.equal(f.sent.length,1);assert.equal(f.sent[0].msg_type,'interactive');assert.equal(f.sent[0].receive_id,'ou_test');assert.ok(!f.sent[0].content.includes('workflow-panorama'));
@@ -78,7 +87,7 @@ test('idle morning polls do not acquire a transaction or rewrite the task store'
  for(let i=0;i<10;i++){f.advance();f.service.queueMorning();}
  assert.equal(writes,0);assert.equal(readFileSync(f.store.file,'utf8'),before);
  f.setTime('2026-09-24T08:00:00+08:00');await f.service.participants.refresh();f.service.queueMorning();
- assert.equal(writes,1);assert.equal(f.store.read().flowNotifications.length,2);
+ assert.equal(writes,0);assert.equal(f.store.read().flowNotifications.length,1);
 });
 test('empty, paused, future and source-invalid stores are read-only during morning polls',async t=>{
  const f=await fixture(t),transaction=f.store.transaction.bind(f.store);let writes=0;

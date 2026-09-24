@@ -1,3 +1,4 @@
+import {sourceSignature,verifiedSources,heartbeatSources} from './source-sync-state.mjs';
 import {readFileSync} from 'node:fs';
 import {requireFact} from './workflow-store.mjs';
 import {FlowCreative} from './flow-creative.mjs';
@@ -29,7 +30,24 @@ export class ProductionSources{
    // Only the daemon that durably imported all three outboxes may own their
    // routine notifications. SLA/escalation notifications stay in this engine.
    this.runtime.serviceNotificationOwners=new Set(data.notificationsEnabled?['idea','cloud','remix']:[]);
-   await this.creativeBridge.sync();this.business.sync(data);
-  }catch(e){this.issue=e.status?e.message:'来源快照读取失败';this.snapshot=null;}
+   const signature=sourceSignature(data,this.runtime.people()),now=this.runtime.clock();
+   if(signature===this.lastSignature&&now>=this.lastFullSync&&now-this.lastFullSync<30000){
+    const at=this.runtime.iso();
+    // Persist an unchanged-source heartbeat every 20 seconds, not on each
+    // five-second poll, while keeping the 45-second notification source gate.
+    if(this.verified?.size&&(!this.lastHeartbeatAt||now-this.lastHeartbeatAt>=20000)){
+     this.runtime.store.transaction(s=>heartbeatSources(s,this.verified,at));
+     this.lastHeartbeatAt=now;
+    }
+    this.creativeBridge.connection.checkedAt=at;
+    for(const connection of Object.values(this.business.connections))connection.checkedAt=at;
+    return;
+   }
+   // A content/personnel change may trigger a full sync in under 20 seconds.
+   // Verify every row durably before letting the heartbeat renew it.
+   await this.creativeBridge.sync({forceVerify:true});await this.business.syncCooperatively(data,{forceVerify:true});
+   this.verified=verifiedSources(this.runtime.store.read(),now);
+   this.lastSignature=signature;this.lastFullSync=now;this.lastHeartbeatAt=now;
+  }catch(e){this.issue=e.status?e.message:'来源快照读取失败';this.snapshot=null;this.lastSignature=null;}
  }
 }

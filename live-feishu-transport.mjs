@@ -5,9 +5,9 @@ const APP_ID='cli_aa9c744d6ffa1cc4';
 // This receiver is registered only on the official app-authenticated outbound
 // WebSocket. It is deliberately not exposed as an HTTP/JSON route.
 export class LiveFeishuTransport {
-  constructor({appId,appSecret,inbox,enabled=false,Client=WSClient,Dispatcher=EventDispatcher}) {
+  constructor({appId,appSecret,inbox,testCards=null,enabled=false,Client=WSClient,Dispatcher=EventDispatcher}) {
     requireFact(appId===APP_ID,'直播卡片只能使用已授权中枢应用',403);
-    Object.assign(this,{appId,appSecret,inbox,enabled,Client,Dispatcher});
+    Object.assign(this,{appId,appSecret,inbox,testCards,enabled,Client,Dispatcher});
     this.client=null;this.lastError='';
   }
   status(){return {enabled:this.enabled,state:this.client?.getConnectionStatus().state||'stopped',error:this.lastError};}
@@ -22,6 +22,11 @@ export class LiveFeishuTransport {
       'card.action.trigger':raw=>{
         try{
           requireFact(raw?.app_id===this.appId&&raw.action?.tag==='button','卡片应用或操作类型不匹配',403);
+          if(raw.action.value?.action==='confirm_live_test'){
+            requireFact(this.testCards,'联调测试回执未启用',403);
+            this.testCards.accept(raw);
+            return {toast:{type:'success',content:'已保存本人联调测试回执，未办理正式业务。'}};
+          }
           const form=raw.action.form_value||{},note=form[raw.action.name==='live_complete'?'completionNote':'feedbackNote'];
           const result=this.inbox.accept({verified:true,appId:raw.app_id,eventId:raw.event_id,
             messageId:raw.context?.open_message_id,openId:raw.operator?.open_id,

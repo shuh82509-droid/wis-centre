@@ -12,7 +12,7 @@ export function currentNodeNotice(notice,task,node,now){
     const slot=task?.runtime?.liveSession;
     if(!slot||slot.sourceIssue||task.runtime.state!=='running'||!['pending','ready'].includes(node?.state)||node.attempt!==notice.attempt||node.owner.number!==notice.recipient)return false;
     if(notice.kind==='live_assignment')return Date.parse(slot.endAt)>now;
-    return notice.businessDate===new Date(now+8*3600000).toISOString().slice(0,10)&&Date.parse(slot.startAt)<Date.parse(notice.businessDate+'T00:00:00+08:00')+86400000;
+    return notice.businessDate===new Date(now+8*3600000).toISOString().slice(0,10)&&Date.parse(slot.startAt)<Date.parse(notice.businessDate+'T00:00:00+08:00')+86400000&&Date.parse(slot.endAt)>now;
   }
   if(notice.kind==='live_source_changed')return !!(task?.runtime?.liveSession?.sourceIssue&&['running','paused'].includes(task.runtime.state)&&notice.recipient===task.runtime.manager.number);
   if(task?.runtime?.liveSession?.sourceIssue&&['ready','returned','overdue','escalated','live_source_restored'].includes(notice.kind))return false;

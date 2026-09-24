@@ -27,3 +27,16 @@ test('callback errors expose no private payloads and do not report success',asyn
   const t=new LiveFeishuTransport({appId,appSecret:'secret',enabled:true,inbox:{accept(){throw new Error('private payload');}},Client:MockClient});t.start();
   const result=await t.client.dispatcher.invoke(raw(),{needCheck:false});assert.equal(result.toast.type,'error');assert.ok(!JSON.stringify(result).includes('private payload'));t.stop();
 });
+test('the existing formal WS routes an approved test receipt to its isolated ledger, never business inbox',async()=>{
+  const accepted=[];
+  const t=new LiveFeishuTransport({appId,appSecret:'test',enabled:true,
+    inbox:{accept(){throw new Error('business inbox must not receive test');}},
+    testCards:{accept:event=>{accepted.push(event);return {status:'done'};}},Client:MockClient});
+  t.start();const event=raw({action:{tag:'button',value:{action:'confirm_live_test',testId:'test',nonce:'nonce'}}});
+  const result=await t.client.dispatcher.invoke(event,{needCheck:false});
+  assert.equal(result.toast.type,'success');assert.match(result.toast.content,/未办理正式业务/);
+  assert.equal(accepted.length,1);
+  const invalid=raw({action:{tag:'button',value:{action:'confirm_live_test'}}});invalid.header.app_id='wrong';
+  assert.equal((await t.client.dispatcher.invoke(invalid,{needCheck:false})).toast.type,'error');
+  assert.equal(accepted.length,1);t.stop();
+});

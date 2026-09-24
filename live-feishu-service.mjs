@@ -6,6 +6,7 @@ import {LiveFeishuActions} from './live-feishu-actions.mjs';
 import {LiveFeishuInbox} from './live-feishu-inbox.mjs';
 import {LiveFeishuTransport} from './live-feishu-transport.mjs';
 import {liveFeishuCard} from './live-feishu-card.mjs';
+import {LiveTestCard} from './live-test-card.mjs';
 
 // Disabled unless explicitly commissioned. No fallback to personal CLI tokens.
 export class LiveFeishuService {
@@ -29,7 +30,8 @@ export class LiveFeishuService {
       });
       const data=await response.json();requireFact(response.ok&&data.code===0,'飞书卡片更新待重试',503);
     }});
-    this.transport=new LiveFeishuTransport({appId:notifier.appId,appSecret:notifier.secret,inbox:this.inbox,enabled:true});
+    this.testCards=env.FLOW_LIVE_TEST_CARD_ENABLED==='true'?new LiveTestCard({appId:notifier.appId,notifier,clock}):null;
+    this.transport=new LiveFeishuTransport({appId:notifier.appId,appSecret:notifier.secret,inbox:this.inbox,testCards:this.testCards,enabled:true});
     runtime.liveParticipants=this.participants;notifier.liveCards=this;
     // Cold identity cache or disconnected transport is not proof that an
     // employee lost eligibility. Actions/dispatch still fail closed via their
@@ -41,7 +43,7 @@ export class LiveFeishuService {
   recipient(number){return this.participants?.recipient(number)||null;}
   ready(){return !!(this.enabled&&!this.closed&&this.transport.ready());}
   people(hubPeople){return this.participants?.merge(hubPeople)||hubPeople;}
-  status(){return {enabled:this.enabled,transport:this.transport?.status()||null,verified:this.participants?.people().length||0,configured:this.bindings.length,issues:this.participants?.issues||[]};}
+  status(){return {enabled:this.enabled,transport:this.transport?.status()||null,verified:this.participants?.people().length||0,configured:this.bindings.length,issues:this.participants?.issues||[],testCard:this.testCards?.status()||null};}
   async refreshIdentities(){
     if(!this.enabled||this.closed)return;
     if(this.identityRefreshPromise)return this.identityRefreshPromise;
@@ -66,17 +68,18 @@ export class LiveFeishuService {
     try{
       await this.refreshIdentities();
       if(!this.closed&&!this.transport.client)await this.transport.start();
-      if(!this.closed){this.queueMorning();await this.inbox.flush();}
+      if(!this.closed){this.queueMorning();await this.inbox.flush();await this.testCards?.flush();}
     }finally{this.running=false;}
   }
   queueMorning(){
     if(!this.ready())return;
-    const local=new Date(this.clock()+8*3600000),date=local.toISOString().slice(0,10);
+    const now=this.clock(),local=new Date(now+8*3600000),date=local.toISOString().slice(0,10);
     if(local.getUTCHours()<8)return;
     const tomorrow=Date.parse(date+'T00:00:00+08:00')+86400000;
     const participants=this.participants;
     function* due(s){
-      for(const task of s.tasks.filter(t=>t.runtime?.liveSession&&t.runtime.state==='running'&&!t.runtime.liveSession.sourceIssue&&Date.parse(t.runtime.liveSession.startAt)<tomorrow)){
+      for(const task of s.tasks.filter(t=>t.runtime?.liveSession&&t.runtime.state==='running'&&!t.runtime.liveSession.sourceIssue&&
+        Date.parse(t.runtime.liveSession.startAt)<tomorrow&&Date.parse(t.runtime.liveSession.endAt)>now)){
         for(const node of task.runtime.nodes.filter(n=>['pending','ready'].includes(n.state)&&participants.canOwn(n.owner.number,n.id))){
           const exists=(s.flowNotifications||[]).some(n=>n.taskId===task.id&&n.nodeId===node.id&&n.attempt===node.attempt&&n.recipient===node.owner.number&&n.kind==='live_today'&&n.businessDate===date);
           if(exists)continue;
