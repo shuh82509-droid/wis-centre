@@ -203,8 +203,8 @@ export function installNextDayReleasePermit(file,{manifest,evidence,privateKey,c
         // The permit is already live. A failed lock cleanup may block a later
         // renewal, but must not turn an activated release into a false
         // "failed, safe to retry" result for the operator.
-        try{closeSync(guardFd);}catch{console.error('Next-day permit active; release-lock close needs attention');}
-        try{unlinkSync(guard);}catch{console.error('Next-day permit active; release-lock removal needs attention');}
+        try{closeSync(guardFd);}catch{try{console.error('Next-day permit active; release-lock close needs attention');}catch{}}
+        try{unlinkSync(guard);}catch{try{console.error('Next-day permit active; release-lock removal needs attention');}catch{}}
       }else{closeSync(guardFd);unlinkSync(guard);}
     }
   }

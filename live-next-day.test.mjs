@@ -124,7 +124,9 @@ test('an already activated permit is not misreported as failed when lock cleanup
   const f=fixture(),dir=mkdtempSync(join(tmpdir(),'wis-next-day-lock-')),file=join(dir,'permit.json');
   const {privateKey,publicKey}=generateKeyPairSync('ed25519');
   let ticks=0;
+  const previousLog=console.error;
   try{
+    console.error=()=>{throw Error('release logger unavailable');};
     const permit=installNextDayReleasePermit(file,{manifest:releaseManifestAt(f,firstActivationAt),
       evidence:releaseEvidence(f,firstActivationAt),privateKey,clock:()=>{
         if(++ticks===2)unlinkSync(file+'.install.lock');
@@ -132,7 +134,7 @@ test('an already activated permit is not misreported as failed when lock cleanup
       }});
     assert.equal(ticks,2);
     assert.deepEqual(readNextDayReleasePermit(file,{publicKey}),permit);
-  }finally{if(existsSync(file))unlinkSync(file);rmdirSync(dir);}
+  }finally{console.error=previousLog;if(existsSync(file))unlinkSync(file);rmdirSync(dir);}
 });
 
 test('signed permit is OFF for an absent key, wrong key, legacy format or changed field',()=>{
