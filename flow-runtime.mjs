@@ -142,6 +142,10 @@ export class FlowRuntime{
    }
    else{requireFact(t.runtime.state==='running','流程已暂停，请先恢复',409);requireFact(n,'执行节点不存在',404);requireFact(manage||n.owner.number===a.user.number,'只有当前主责或流程管理人可以办理',403);
     if(action==='complete'){
+     // A live session's assigned person must attest their own work. Workflow
+     // management may pause, return or explicitly reassign a node, but it is
+     // not a substitute for the current owner's completion evidence.
+     if(t.runtime.liveSession)requireFact(n.owner.number===a.user.number,'直播节点须由当前主责本人完成；主管可先明确改派或处理异常',403);
      validateLiveCompletion(t,n,b,s,this.clock());
      requireFact(n.state==='ready','节点尚未到达或已经完成',409);this.validateOwner(n,a.user.number,t.runtime.nodes);requireFact(text(b.note),'请记录交付结论');const refs=Array.isArray(b.evidence)?b.evidence:[];
      const inherited=n.canReuseUpstreamEvidence&&!refs.length?t.runtime.nodes.filter(x=>n.dependencies.includes(x.id)&&x.state==='completed').flatMap(x=>x.evidence.map(e=>({...e,reusedFrom:{nodeId:x.id,attempt:x.attempt}}))).slice(0,12):[];

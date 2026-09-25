@@ -5,3 +5,12 @@ test('未登录、权限预览与非品牌身份均不能读取真实任务',asy
 test('跨站和缺少防跨站标识的操作在写入前被拒绝',async()=>{for(const h of [{},{'x-flow-request':'1','content-type':'application/json','sec-fetch-site':'cross-site'},{'x-flow-request':'1','content-type':'application/json',host:'example.com',origin:'https://other.com'}]){const r=await fixture().call('POST','runs',h);assert.equal(r.status,403);assert.equal(r.calls,0);}});
 test('维护模式只暂停写入，原任务仍可读',async()=>{const f=fixture({writes:false});assert.equal((await f.call('GET','overview')).status,200);assert.equal((await f.call('POST','runs')).status,503);});
 test('合法同源操作到达运行引擎，未实现接口不冒充成功',async()=>{const f=fixture();assert.equal((await f.call('POST','runs',{'x-flow-request':'1','content-type':'application/json',host:'example.com',origin:'https://example.com'})).status,201);assert.equal((await f.call('GET','not-a-route')).status,404);});
+test('直播节点非本人在来源及证据准备前拒绝，非直播管理流程不变',async()=>{
+ let who='M',live=true,result;const calls={source:0,evidence:0,command:0};
+ const task=()=>({id:'task_live001',version:1,runtime:{liveSession:live?{key:'isolated'}:undefined,nodes:[{id:'W04.S1.E1',state:'ready',owner:{number:'L'}}]}});
+ const handler=createFlowHandler({runtime:{get:()=>task(),command:()=>{calls.command++;return task();}},sources:{},notifier:{status:()=>({})},liveSessions:{verifyCurrent:async()=>{calls.source++;}},evidenceReader:{prepare:async()=>{calls.evidence++;return {verified:true};}},currentSession:async()=>({status:200,payload:{}}),accessFor:()=>({...manager,canManage:who==='M',user:{...manager.user,number:who}}),previewFor:()=>({active:false}),readJson:async()=>({expectedVersion:1,nodeId:'W04.S1.E1',note:'本人交付'}),sendJson:(_res,status,body)=>{result={status,body};}});
+ const send=async()=>{await handler({method:'POST',headers:{'x-flow-request':'1','content-type':'application/json','idempotency-key':'isolated-complete-001'}},{},new URL('https://example.com/api/flows/runs/task_live001/complete'));return result;};
+ assert.equal((await send()).status,403);assert.deepEqual(calls,{source:0,evidence:0,command:0});
+ who='L';assert.equal((await send()).status,200);assert.deepEqual(calls,{source:1,evidence:1,command:1});
+ who='M';live=false;assert.equal((await send()).status,200);assert.deepEqual(calls,{source:1,evidence:2,command:2});
+});

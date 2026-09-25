@@ -86,6 +86,45 @@ test('跨日班次按原表顺序归入次日且助理覆盖完整',t=>{
 test('五阶段、主播助理并行及房间主责只在本任务受托，不改变全局角色',async t=>{
  const f=fixture(t),task=await f.create();assert.deepEqual([...new Set(task.runtime.nodes.map(n=>n.liveStage))],liveStages);assert.equal(task.runtime.nodes[0].owner.number,'L');assert.equal(task.runtime.nodes.find(n=>n.id==='W04.S2.E2').owner.number,'L');assert.equal(staff.find(p=>p.number==='L').role,'specialist');assert.equal(task.runtime.nodes[0].dueAt,task.runtime.liveSession.startAt);assert.equal(task.notifications[0].recipient,'L');assert.ok(task.runtime.nodes.find(n=>n.id==='W04.S5.E1').dependencies.includes('W04.S4.A1'));
 });
+test('正式直播五环节每个完成节点须由当轮主责本人提交，管理员不能代办',async t=>{
+ const f=fixture(t);let task=await f.create();f.setNow('2026-09-23T12:10:00+08:00');
+ const facts=id=>id==='W04.S3.E2'?{confirmed:true,people:true,equipment:true,goods:true,risks:true}
+  :id.startsWith('W04.S4.')?{confirmed:true,actualStart:'2026-09-23T09:01:00+08:00',actualEnd:'2026-09-23T12:00:00+08:00',platformSessionId:'real-sample'}
+  :id==='W04.S5.E2'?{confirmed:true,noAction:true,noActionReason:'本场复核无新增改进行动'}:{confirmed:true};
+ for(let i=0;i<task.runtime.nodes.length;i++){
+  const node=task.runtime.nodes.find(n=>n.state==='ready');assert.ok(node);
+  const body={expectedVersion:task.version,nodeId:node.id,note:'已核对本节点真实证据',evidence,liveFacts:facts(node.id)};
+  assert.throws(()=>f.runtime.command(access('M'),task.id,'complete',body,'manager-denied-'+i),e=>e.status===403&&/当前主责本人/.test(e.message));
+  assert.equal(f.store.read().tasks[0].version,task.version);
+  assert.equal(f.store.read().flowEvents.filter(e=>e.action==='node_completed').length,i);
+  task=f.runtime.command(access(node.owner.number),task.id,'complete',body,'owner-done-'+i);
+  assert.equal(task.runtime.nodes.find(n=>n.id===node.id).completedBy.number,node.owner.number);
+ }
+ assert.equal(task.runtime.state,'completed');
+ assert.equal(task.flowEvents.filter(e=>e.action==='node_completed').length,task.runtime.nodes.length);
+});
+test('直播管理员仍可暂停、恢复、显式改派和退回，改派后新主责才可完成',async t=>{
+ const f=fixture(t);let task=await f.create(),first=task.runtime.nodes[0];
+ task=f.runtime.command(access('M'),task.id,'pause',{expectedVersion:task.version,note:'等待正式交付资料'},'manager-pause-001');
+ assert.equal(task.runtime.state,'paused');
+ task=f.runtime.command(access('M'),task.id,'resume',{expectedVersion:task.version,note:'资料已核对'},'manager-resume-001');
+ assert.equal(task.runtime.state,'running');
+ task=f.runtime.command(access('M'),task.id,'assign',{expectedVersion:task.version,nodeId:first.id,owner:'M',note:'经确认改派本节点主责'},'manager-reassign-001');
+ first=task.runtime.nodes.find(n=>n.id===first.id);assert.equal(first.owner.number,'M');
+ task=f.runtime.command(access('M'),task.id,'complete',{expectedVersion:task.version,nodeId:first.id,note:'新主责完成并核对',evidence,liveFacts:{confirmed:true}},'reassigned-owner-done-001');
+ assert.equal(task.runtime.nodes.find(n=>n.id===first.id).completedBy.number,'M');
+ const next=task.runtime.nodes.find(n=>n.state==='ready');
+ task=f.runtime.command(access('M'),task.id,'return',{expectedVersion:task.version,nodeId:next.id,targetNodeId:first.id,note:'需补充原节点资料'},'manager-return-001');
+ assert.equal(task.runtime.nodes.find(n=>n.id===first.id).state,'ready');
+ assert.equal(task.runtime.nodes.find(n=>n.id===first.id).history.length,1);
+});
+test('非正式直播流程保留现有管理员代办权限',t=>{
+ const f=fixture(t),task=f.runtime.create(access(),{workflow:'04',options:{anchorMode:'existing'},owner:'A',manager:'M',title:'普通直播档案流程',sourceUrl:'https://example.com/source',acceptance:'资料完成可核验'},'ordinary-live-001');
+ assert.equal(task.runtime.liveSession,undefined);
+ assert.equal(task.runtime.nodes[0].owner.number,'A');
+ const done=f.runtime.command(access('M'),task.id,'complete',{expectedVersion:task.version,nodeId:task.runtime.nodes[0].id,note:'现行管理权限提交',evidence},'ordinary-manager-done-001');
+ assert.equal(done.runtime.nodes[0].completedBy.number,'M');
+});
 test('重复派工、重复请求和重启保留同一任务及通知',async t=>{
  const f=fixture(t),first=await f.create();assert.equal((await f.create()).id,first.id);assert.equal((await f.create('different-key')).id,first.id);assert.equal(f.store.read().tasks.length,1);assert.equal(f.store.read().flowNotifications.length,3);assert.equal(f.store.read().flowNotifications.filter(n=>n.kind==='live_assignment').length,2);assert.equal(new FlowRuntime(f.store,{people:()=>staff}).get(access(),first.id).runtime.liveSession.key,first.runtime.liveSession.key);
 });
