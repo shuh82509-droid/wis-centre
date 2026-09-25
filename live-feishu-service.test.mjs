@@ -75,6 +75,33 @@ test('external staff receive interactive cards without hub link and callback rec
  const notice=f.store.read().flowNotifications[0];assert.equal(notice.channel,'live_feishu_card');assert.equal(notice.state,'sent');assert.equal(notice.messageId,'om_1');
  await f.notifier.flush();assert.equal(f.sent.length,1);
 });
+test('a verified person who also owns a non-execution stage receives an OA text link, never an unusable Feishu action card',async t=>{
+ const f=await fixture(t),task=structuredClone(f.store.read().tasks[0]);
+ task.runtime.nodes=[{id:'W04.S2.E1',title:'备播与排班',state:'ready',attempt:1,owner:{number:'A',name:'测试同事'}}];
+ const notice={kind:'ready',recipient:'A',nodeId:'W04.S2.E1',attempt:1};
+ assert.equal(f.service.has('A'),true);assert.equal(f.service.handles('A','W04.S2.E1'),false);
+ assert.equal(f.notifier.delivery(notice,task).msg_type,'text');
+ assert.throws(()=>f.service.delivery(notice,task),/只有当前主播或助理执行节点/);
+ assert.equal(f.service.handles('A','W04.S4.E1'),true);
+});
+test('a standard non-live W04 execution task stays on OA text even for a card-bound person',async t=>{
+ const f=await fixture(t),task=structuredClone(f.store.read().tasks[0]);
+ delete task.runtime.liveSession;
+ task.runtime.nodes[0].state='ready';
+ const notice={kind:'ready',recipient:'A',nodeId:'W04.S4.E1',attempt:1};
+ assert.equal(f.service.handles('A','W04.S4.E1'),true);
+ assert.equal(f.notifier.delivery(notice,task).msg_type,'text');
+ assert.throws(()=>f.service.delivery(notice,task),/非直播场次/);
+});
+test('a card-bound live colleague receives final completed status as text, not an unsupported action card',async t=>{
+ const f=await fixture(t),task=structuredClone(f.store.read().tasks[0]);
+ task.runtime.state='completed';
+ const notice={kind:'completed',recipient:'A',nodeId:null,attempt:1};
+ const delivery=f.notifier.delivery(notice,task);
+ assert.equal(delivery.msg_type,'text');
+ assert.match(JSON.parse(delivery.content).text,/流程已完成/);
+ assert.throws(()=>f.service.delivery(notice,task),/不支持此类外部参与人通知/);
+});
 test('disconnected callback transport retains unsent work, without burning retries or inventing delivery',async t=>{
  const f=await fixture(t);f.service.queueMorning();f.connect(false);assert.equal(f.notifier.canQueue('A'),false);await f.notifier.flush();
  assert.equal(f.sent.length,0);const notice=f.store.read().flowNotifications[0];assert.equal(notice.state,'ready');assert.equal(notice.attempts,0);assert.equal(notice.unknown,undefined);

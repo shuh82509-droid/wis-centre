@@ -40,6 +40,7 @@ export class LiveFeishuService {
   }
   assignmentChecksReady(){return this.ready()&&this.participants.bindings.every(b=>this.participants.verified(b.number)||this.participants.issues.some(i=>i.number===b.number));}
   has(number){return this.enabled&&this.participants.bindings.some(b=>b.number===number);}
+  handles(number,nodeId){return this.has(number)&&this.participants.canOwn(number,nodeId);}
   recipient(number){return this.participants?.recipient(number)||null;}
   ready(){return !!(this.enabled&&!this.closed&&this.transport.ready());}
   people(hubPeople){return this.participants?.merge(hubPeople)||hubPeople;}
@@ -58,7 +59,7 @@ export class LiveFeishuService {
   delivery(notice,task){
     requireFact(this.ready()&&this.recipient(notice.recipient),'飞书办理通道或身份待核验',503);
     requireFact(task.workflow==='04'&&task.runtime?.liveSession,'非直播场次不得向此名单通知',403);
-    if(notice.nodeId)return {msg_type:'interactive',channel:'live_feishu_card',content:JSON.stringify(liveFeishuCard(notice,task))};
+    if(notice.nodeId){requireFact(this.handles(notice.recipient,notice.nodeId),'只有当前主播或助理执行节点可使用飞书办理卡',403);return {msg_type:'interactive',channel:'live_feishu_card',content:JSON.stringify(liveFeishuCard(notice,task))};}
     const labels={pause:'流程已暂停',resume:'流程已恢复',cancel:'流程已终止'};
     requireFact(labels[notice.kind],'不支持此类外部参与人通知',409);
     return {msg_type:'text',channel:'live_feishu_text',content:JSON.stringify({text:`【WIS 直播工作通知】${labels[notice.kind]}\n${task.runtime.liveSession.date} · ${task.runtime.liveSession.roomName}\n请以最新工作卡片和直播负责人说明为准，无需登录中枢。`})};

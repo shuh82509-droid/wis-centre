@@ -51,7 +51,7 @@ function fixture(t,{post='ok',mget='ok',onToken}={}){
       return {channel:'feishu-live',taskId:current.id,nodeId,user:{number:'A'}};
     },
   };
-  const cards={has:number=>number==='A',ready:()=>true,participants,
+  const cards={has:number=>number==='A',handles:(number,nodeId)=>number==='A'&&nodeId==='W04.S4.E1',ready:()=>true,participants,
     recipient:participants.recipient,
     delivery:(row,current)=>({msg_type:'interactive',channel:'live_feishu_card',
       content:JSON.stringify(liveFeishuCard(row,current))})};

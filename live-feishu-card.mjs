@@ -9,7 +9,7 @@ const button = (name, title, primary = false) => ({tag:'button', name, text:plai
 // The card never carries a bearer credential, editable owner ID or task ID.
 export function liveFeishuCard(notice, task, {receipt = null} = {}) {
   const slot = task.runtime?.liveSession, node = task.runtime?.nodes.find(n => n.id === notice.nodeId);
-  requireFact(slot && node?.owner.number === notice.recipient, '卡片不是本人直播节点', 403);
+  requireFact(slot && /^W04\.S4\.(E1|A[1-9]\d*)$/.test(node?.id||'') && node?.owner.number === notice.recipient, '卡片不是本人主播或助理执行节点', 403);
   const ready = task.runtime.state === 'running' && !slot.sourceIssue && node.state === 'ready' && node.attempt === notice.attempt;
   const active = task.runtime.state === 'running' && !slot.sourceIssue && ['pending','ready'].includes(node.state) && node.attempt === notice.attempt;
   const elements = [{tag:'column_set',flex_mode:'none',columns:[{tag:'column',width:'weighted',weight:1,background_style:'blue-50',padding:'12px',vertical_spacing:'4px',elements:[

@@ -18,7 +18,7 @@ test('并行主责保留分支与汇合，不把无关岗位拼入本人路径',
 function refreshFixture(overview,{wasManager=false,failure=null}={}){
  const elements=new Map(),requests=[],state={loading:false,view:'studio',catalog:{secret:'old'},overview:wasManager?{access:{canManage:true}}:null,task:wasManager?{id:'old'}:null};
  function $(id){if(!elements.has(id))elements.set(id,{disabled:false,hidden:false,open:id==='#modal',scrollTop:0,classList:{remove(){}},close(){this.open=false;}});return elements.get(id);}
- const ctx=vm.createContext({state,$,api:async path=>{requests.push(path);if(failure)throw failure;if(path==='overview')return overview;if(path==='sources')return {renders:[]};if(path==='catalog')return {flows:[],stages:[]};throw Error('Unexpected '+path);},render(){},error(){},empty:(a,b)=>a+b,closeModal:()=>$('#modal').close(),location:{search:''},URLSearchParams,Promise,BASE:'/hub/'});
+ const ctx=vm.createContext({state,$,api:async path=>{requests.push(path);if(failure)throw failure;if(path==='overview')return overview;if(path==='sources')return {renders:[]};if(path==='catalog')return {flows:[],stages:[]};throw Error('Unexpected '+path);},render(){},error(){},empty:(a,b)=>a+b,loginResumeHtml:()=>'',closeModal:()=>$('#modal').close(),location:{search:''},URLSearchParams,Promise,BASE:'/hub/'});
  vm.runInContext('let taskRequest=0;\n'+source.split('\n').find(line=>line.startsWith('async function refresh(')),ctx);
  return {ctx,state,requests,$};
 }

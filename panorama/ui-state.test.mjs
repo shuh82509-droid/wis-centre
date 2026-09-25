@@ -53,7 +53,7 @@ test('先前任务的延迟响应不会覆盖后来打开的任务',async()=>{
  const context=vm.createContext({state:{task:null,stage:null,openNodes:new Set(),overview:{access:{canManage:false}}},document:{activeElement:{}},
   api:path=>path==='runs/A'?slowA:Promise.resolve({id:'B',runtime:{nodes:[]}}),
   openDrawer(){},drawerHeader(){return '';},renderTask(){},
-  history:{replaceState(){}},location:{pathname:'/workflow/'},encodeURIComponent,esc:String});
+  history:{replaceState(){}},location:{pathname:'/workflow/',search:''},URLSearchParams,API:'/workflow/api/',encodeURIComponent,esc:String});
  vm.runInContext('let taskRequest=0,lastFocus;\n'+permissionHelpers+'\n'+openTask,context);
  const first=context.openTask('A');await context.openTask('B');
  resolveA({id:'A',runtime:{nodes:[]}});await first;

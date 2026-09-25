@@ -39,7 +39,7 @@ import { FlowInboxSummary } from "./FlowInboxSummary";
 import { LiveDailyWork } from "./LiveDailyWork";
 import { SparkLibrary } from "./SparkLibrary";
 import { sourceTime } from "./sourceTime";
-import { embeddedCloudAsset, initialModule } from "./moduleLocation";
+import { embeddedCloudAsset, initialModule, workflowReturnTarget } from "./moduleLocation";
 import { businessDateLabel, combinedBusinessDateLabel } from "./businessDate";
 import { isOfficialMaterial, materialGmvLabel, materialOrderCount } from "./materialMetrics";
 import type { AdminGrant, AppModule, AssistantAttachment, AssistantConversation, AssistantMessage, AssistantStatus, BusinessIntelligenceOverview, CreativeIncentiveOverview, DashboardScope, DashboardScopeGrant, HubSession, LoginGrant, ModuleAccessGrant, OperationLog, OptimizationResponse, PermissionPreview, PermissionPreviewSubject, TaskCenterItem, TaskCenterOverview, TaskCenterSourceKind, TaskCenterStatus, WorkspaceHomeSummary } from "./types";
@@ -2035,6 +2035,11 @@ function sessionForPreview(session: HubSession, preview: PermissionPreview): Hub
 }
 
 function HubShell({ session, onLogout }: { session: HubSession; onLogout: () => void }) {
+  useEffect(() => {
+    if (!session.access.allowed_modules.includes('workflow-engine')) return;
+    const target = workflowReturnTarget(window.location.hash, window.location.href);
+    if (target) window.location.assign(target);
+  }, [session.access.allowed_modules]);
   const [view, setView] = useState<ViewKey>(() => window.location.hash === '#spark-library' ? 'spark' : 'hub');
   const [activeModule, setActiveModule] = useState<string | null>(() => {
     const module = initialModule(window.location.hash);
