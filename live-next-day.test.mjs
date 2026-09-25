@@ -5,24 +5,252 @@ import {scheduleSessions} from './live-session-flow.mjs';
 import {currentNodeNotice} from './flow-notice-validity.mjs';
 import {FlowFeishu} from './flow-feishu.mjs';
 import {FlowRuntime} from './flow-runtime.mjs';
+import {NEXT_DAY_PERMIT_MOUNT,isolatedNextDayPermitPath,nextDayReleaseManifest,installNextDayReleasePermit,
+  readNextDayReleasePermit,currentNextDayRelease} from './live-next-day-release.mjs';
+import {mkdtempSync,readFileSync,statSync,unlinkSync,rmdirSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
 
 function fixture(){
   let now=Date.parse('2026-09-24T16:00:00+08:00');
   const date='2026-09-25',room={code:'guanqi',name:'官旗',anchors:[['09:00','10:00','主播甲']],assistants:[['09:00','10:00','助理乙']]};
   const people=['主播甲','助理乙'].map((name,i)=>({number:i?'B':'A',name,active:true,center:'直播中心',workflowEnabled:true,modules:['live-room-management','workflow-engine']}));
-  const raw={date,updatedAt:new Date(now).toISOString(),rooms:[room],source:{mode:'official_live',verified:true,spreadsheetToken:'EuYqssm4WhNwAvtyybKcDdk1ned'},sourceStatus:{guanqi:{found:true,revision:15,sheetId:'NYB2iu'}}};
+  const otherRooms=[['brand_selection','品牌精选','MVpDv0'],['youxuan','优选','LRAvIU'],['wangou','王鸥美肤','PhlV42']]
+    .map(([code,name])=>({...room,code,name}));
+  const raw={date,updatedAt:new Date(now).toISOString(),rooms:[room,...otherRooms],
+    source:{mode:'official_live',verified:true,spreadsheetToken:'EuYqssm4WhNwAvtyybKcDdk1ned'},
+    sourceStatus:{guanqi:{found:true,revision:15,sheetId:'NYB2iu'},
+      brand_selection:{found:true,revision:15,sheetId:'MVpDv0'},youxuan:{found:true,revision:15,sheetId:'LRAvIU'},
+      wangou:{found:true,revision:15,sheetId:'PhlV42'}}};
   const cardEligible={verified:number=>['A','B'].includes(number),canOwn:number=>['A','B'].includes(number)};
-  const slot=scheduleSessions(raw,date,people,now,cardEligible)[0];
-  const nodes=[{id:'W04.S4.E1',state:'pending',attempt:1,owner:{number:'A'}},{id:'W04.S4.A1',state:'pending',attempt:1,owner:{number:'B'}}];
-  const task={id:'T1',runtime:{state:'running',liveSession:slot,nodes}};
-  const data={tasks:[task],flowNotifications:nodes.map((node,i)=>({id:`card-${i}`,taskId:task.id,nodeId:node.id,attempt:node.attempt,recipient:node.owner.number,kind:'live_assignment',state:'sent',messageId:`om_card_${i}`}))};
+  const slots=scheduleSessions(raw,date,people,now,cardEligible),slot=slots[0];
+  const tasks=slots.map((shift,i)=>({id:`T${i+1}`,runtime:{state:'running',liveSession:shift,
+    nodes:[{id:'W04.S4.E1',state:i?'completed':'pending',attempt:1,owner:{number:'A'}},
+      {id:'W04.S4.A1',state:i?'completed':'pending',attempt:1,owner:{number:'B'}}]}}));
+  const nodes=tasks[0].runtime.nodes;
+  const data={tasks,flowNotifications:tasks.flatMap((task,i)=>task.runtime.nodes.map((node,j)=>({id:`card-${i*2+j}`,
+    taskId:task.id,nodeId:node.id,attempt:node.attempt,recipient:node.owner.number,kind:'live_assignment',
+    state:'sent',messageId:`om_card_${i*2+j}`})))};
   const store={read:()=>structuredClone(data),transaction:fn=>fn(data)};
   const runtime={store,people:()=>people,liveParticipants:{people:()=>people,canOwn:(number,nodeId)=>['A','B'].includes(number)&&/^W04\.S4\.(E1|A\d+)$/.test(nodeId)},ensure:s=>{s.flowNotifications??=[];},notify:(s,t,n,kind,recipient,eventId)=>s.flowNotifications.push({id:'notice'+s.flowNotifications.length,key:[t.id,n?.id,kind,recipient,eventId].join(':'),taskId:t.id,nodeId:n?.id||null,attempt:n?.attempt||0,kind,recipient,state:'ready',attempts:0,nextAt:now,createdAt:new Date(now).toISOString()})};
-  const notifier={enabled:true,recipient:n=>({id:n===LIVE_WAR_ROOM_RECIPIENT?'oc_test':n})};
+  const notifier={enabled:true,recipient:n=>({id:n===LIVE_WAR_ROOM_RECIPIENT?'oc_3f92ef62d6160399ee823e74def199e6':n==='A'?'ou_anchor':'ou_assistant',type:n===LIVE_WAR_ROOM_RECIPIENT?'chat_id':'open_id'})};
   const liveSessions={enabled:true,readSchedule:async()=>({...raw,updatedAt:new Date(now).toISOString()})};
-  const job=new LiveNextDayReminder({runtime,liveSessions,notifier,enabled:true,clock:()=>now});
-  return {job,data,nodes,slot,advance:()=>{now+=300001;},setNow:v=>{now=Date.parse(v);},now:()=>now};
+  const releaseId='hub-r62-nextday-test',bootId='boot-r62-nextday-test';
+  const manifest=nextDayReleaseManifest({raw,snapshot:data,people,participants:runtime.liveParticipants,
+    recipient:n=>notifier.recipient(n),date,now,releaseId,bootId});
+  const permit={version:1,businessDate:date,scopeHash:manifest.scopeHash,sourceHash:manifest.sourceHash,
+    sourceRevision:manifest.sourceRevision,roomCodes:manifest.roomCodes,groupChatId:manifest.groupChatId,
+    releaseId,bootId,
+    issuedAt:new Date(now-60000).toISOString(),expiresAt:new Date(now+30*60000).toISOString()};
+  const job=new LiveNextDayReminder({runtime,liveSessions,notifier,readReleasePermit:()=>permit,
+    releaseId,bootId,enabled:true,clock:()=>now});
+  const rearm=async()=>{
+    const fresh=await liveSessions.readSchedule(null,date,{fresh:true});
+    const latest=nextDayReleaseManifest({raw:fresh,snapshot:data,people,participants:runtime.liveParticipants,
+      recipient:n=>notifier.recipient(n),date,now,releaseId,bootId});
+    Object.assign(permit,{scopeHash:latest.scopeHash,sourceHash:latest.sourceHash,
+      sourceRevision:latest.sourceRevision,roomCodes:latest.roomCodes});
+    return latest;
+  };
+  return {job,data,nodes,slot,manifest,permit,rearm,advance:()=>{now+=300001;},setNow:v=>{now=Date.parse(v);},now:()=>now};
 }
+const verifySource=(f,notice)=>currentOfficialNextDaySource(notice,{runtime:f.job.runtime,liveSessions:f.job.liveSessions,
+  notifier:f.job.notifier,readReleasePermit:f.job.readReleasePermit,releaseId:f.job.releaseId,
+  bootId:f.job.bootId,clock:f.now});
+const permitOptions=f=>({readNextDayPermit:f.job.readReleasePermit,releaseId:f.job.releaseId,bootId:f.job.bootId});
+
+test('only the exact isolated read-only mount path may be configured; no DATA_DIR fallback exists',()=>{
+  assert.equal(isolatedNextDayPermitPath({}),null);
+  assert.equal(isolatedNextDayPermitPath({FLOW_LIVE_NEXT_DAY_PERMIT_FILE:'/app/data/live-next-day-release-permit.json'}),null);
+  assert.equal(isolatedNextDayPermitPath({FLOW_LIVE_NEXT_DAY_PERMIT_FILE:'/run/live-next-day-release/../data/permit.json'}),null);
+  assert.equal(isolatedNextDayPermitPath({FLOW_LIVE_NEXT_DAY_PERMIT_FILE:NEXT_DAY_PERMIT_MOUNT}),NEXT_DAY_PERMIT_MOUNT);
+});
+
+test('a local release permit is atomically written only after exact external card and group readback',()=>{
+  const f=fixture(),dir=mkdtempSync(join(tmpdir(),'wis-next-day-permit-')),file=join(dir,'release.json');
+  const original=JSON.stringify(f.data);
+  const checkedAt=Date.parse('2026-09-24T16:00:00+08:00');
+  const evidence={operator:'FD-026222',scopeHash:f.manifest.scopeHash,sourceRevision:f.manifest.sourceRevision,
+    gatewayReleaseId:f.manifest.releaseId,gatewayBootId:f.manifest.bootId,gatewayVerified:true,
+    groupChatId:f.manifest.groupChatId,checkedAt:new Date(checkedAt).toISOString(),
+    cardMessages:f.manifest.refs.map(r=>({cardNoticeId:r.cardNoticeId,cardMessageId:r.cardMessageId}))};
+  try{
+    assert.equal(readNextDayReleasePermit(file),null);
+    assert.throws(()=>installNextDayReleasePermit(file,{manifest:f.manifest,
+      evidence:{...evidence,cardMessages:evidence.cardMessages.slice(0,1)},clock:()=>checkedAt}),/派工卡独立读回/);
+    assert.equal(readNextDayReleasePermit(file),null);
+    const permit=installNextDayReleasePermit(file,{manifest:f.manifest,evidence,clock:()=>checkedAt});
+    assert.deepEqual(readNextDayReleasePermit(file),permit);
+    if(process.platform==='linux'){
+      assert.equal(statSync(dir).mode&0o777,0o700);
+      assert.equal(statSync(file).mode&0o777,0o600);
+    }
+    assert.equal(permit.businessDate,'2026-09-25');
+    assert.equal(permit.groupChatId,'oc_3f92ef62d6160399ee823e74def199e6');
+    assert.ok(Date.parse(permit.expiresAt)<=Date.parse('2026-09-24T16:30:00+08:00'));
+    assert.equal(JSON.stringify(f.data),original,'permit installation never touches the active task/card ledger');
+    const renewedAt=Date.parse('2026-09-24T16:20:00+08:00');
+    let renewed;
+    f.job.runtime.store.transaction(s=>{
+      s.tasks[0].runtime.nodes[0].liveAcknowledgements=[{kind:'live_ack',attempt:1,by:'A',at:new Date(renewedAt).toISOString()}];
+      renewed=installNextDayReleasePermit(file,{manifest:{...f.manifest,preparedAt:new Date(renewedAt).toISOString()},
+        evidence:{...evidence,checkedAt:new Date(renewedAt).toISOString()},clock:()=>renewedAt});
+    });
+    assert.equal(f.data.tasks[0].runtime.nodes[0].liveAcknowledgements.length,1,
+      'a task callback ledger update must survive release-file installation');
+    assert.equal(renewed.scopeHash,permit.scopeHash,'a renewed permit cannot widen the release claim');
+    assert.ok(Date.parse(renewed.expiresAt)>Date.parse(permit.expiresAt));
+    assert.throws(()=>installNextDayReleasePermit(file,{manifest:{...f.manifest,businessDate:'2026-09-26'},
+      evidence,clock:()=>checkedAt}),/签名|范围|日期/);
+    assert.equal(JSON.parse(readFileSync(file,'utf8')).scopeHash,renewed.scopeHash);
+  }finally{if(readNextDayReleasePermit(file))unlinkSync(file);rmdirSync(dir);}
+});
+
+test('no permit or a slow source check crossing 17:00 cannot enqueue a formal reminder',async()=>{
+  const absent=fixture();absent.job.readReleasePermit=()=>null;
+  await absent.job.tick();
+  assert.equal(absent.data.flowNotifications.filter(n=>n.kind.startsWith('live_tomorrow')).length,0);
+  const late=fixture(),read=late.job.liveSessions.readSchedule;
+  late.job.liveSessions.readSchedule=async(...args)=>{
+    const raw=await read(...args);
+    late.setNow('2026-09-24T17:00:01+08:00');
+    return {...raw,updatedAt:new Date(late.now()).toISOString()};
+  };
+  await late.job.tick();
+  assert.equal(late.data.flowNotifications.filter(n=>n.kind.startsWith('live_tomorrow')).length,0);
+});
+
+test('15:59 cannot enqueue or POST even with a pre-installed permit and a due queued notice',async()=>{
+  const f=fixture();
+  f.setNow('2026-09-24T15:59:00+08:00');
+  await f.job.tick();
+  assert.equal(f.data.flowNotifications.filter(n=>n.kind.startsWith('live_tomorrow')).length,0);
+  f.setNow('2026-09-24T16:00:00+08:00');
+  await f.job.tick();
+  const direct=f.data.flowNotifications.find(n=>n.kind==='live_tomorrow'&&n.recipient==='A');
+  assert.ok(direct);
+  f.data.flowNotifications.find(n=>n.kind==='live_tomorrow'&&n.recipient==='B').state='superseded';
+  f.setNow('2026-09-24T15:59:59+08:00');
+  f.permit.issuedAt=new Date(f.now()-60000).toISOString();
+  direct.nextAt=f.now()-1;
+  let posts=0;
+  const sender=new FlowFeishu(f.job.runtime.store,{people:f.job.runtime.people,clock:f.now,...permitOptions(f),
+    env:{FLOW_NOTIFICATIONS_ENABLED:'true',FEISHU_APP_ID:'test',FEISHU_APP_SECRET:'test',FEISHU_RECIPIENT_MAP_JSON:JSON.stringify({A:'ou_anchor'})},
+    fetchImpl:async()=>{posts++;throw Error('must not POST');}});
+  await sender.flush();
+  assert.equal(posts,0);
+  assert.equal(direct.state,'superseded');
+});
+
+test('missing even one of the four official rooms blocks the whole release',async()=>{
+  const f=fixture(),read=f.job.liveSessions.readSchedule;
+  f.job.liveSessions.readSchedule=async(...args)=>{
+    const raw=await read(...args);
+    return {...raw,rooms:raw.rooms.filter(room=>room.code!=='wangou')};
+  };
+  await f.job.tick();
+  assert.equal(f.data.flowNotifications.filter(n=>n.kind.startsWith('live_tomorrow')).length,0);
+  assert.equal(f.data.liveNextDayStatus.state,'attention');
+  assert.match(f.data.liveNextDayStatus.issues.map(x=>x.message).join('；'),/全部四个直播间|四房解析/);
+});
+
+test('permit expiry inside 16:00 stops POST after token acquisition',async()=>{
+  const f=fixture();await f.job.tick();
+  f.data.flowNotifications.find(n=>n.kind==='live_tomorrow'&&n.recipient==='B').state='superseded';
+  f.permit.expiresAt=new Date(f.now()+1000).toISOString();
+  const direct=f.data.flowNotifications.find(n=>n.kind==='live_tomorrow'&&n.recipient==='A');
+  const sent=await flushAfterTokenWait(f,()=>f.setNow('2026-09-24T16:00:02+08:00'),{map:{A:'ou_anchor'}});
+  assert.deepEqual(sent,[]);
+  assert.equal(direct.state,'attention');
+  assert.equal(direct.unknown,false);
+});
+
+test('a new workbook revision or a changed assignment-card receipt cannot use the prior permit',async()=>{
+  for(const change of ['source-revision','card-message']){
+    const f=fixture();await f.job.tick();
+    f.data.flowNotifications.find(n=>n.kind==='live_tomorrow'&&n.recipient==='B').state='superseded';
+    const direct=f.data.flowNotifications.find(n=>n.kind==='live_tomorrow'&&n.recipient==='A');
+    const original=f.job.liveSessions.readSchedule;
+    const sent=await flushAfterTokenWait(f,()=>{
+      if(change==='source-revision')f.job.liveSessions.readSchedule=async(...args)=>{
+        const raw=await original(...args);
+        return {...raw,sourceStatus:{...raw.sourceStatus,guanqi:{...raw.sourceStatus.guanqi,revision:16}}};
+      };
+      else f.data.flowNotifications.find(n=>n.id==='card-0').messageId='om_changed';
+    },{map:{A:'ou_anchor'}});
+    assert.deepEqual(sent,[],change);
+    assert.equal(direct.state,'attention',change);
+    assert.equal(direct.unknown,false,change);
+  }
+});
+
+test('a new reminder object in the same Hub instance does not duplicate queued or uncertain notices',async()=>{
+  const f=fixture();await f.job.tick();
+  assert.equal(f.data.flowNotifications.filter(n=>n.kind==='live_tomorrow').length,2);
+  const restarted=new LiveNextDayReminder({runtime:f.job.runtime,liveSessions:f.job.liveSessions,notifier:f.job.notifier,
+    readReleasePermit:f.job.readReleasePermit,releaseId:f.job.releaseId,bootId:f.job.bootId,enabled:true,clock:f.now});
+  await restarted.tick();
+  assert.equal(f.data.flowNotifications.filter(n=>n.kind==='live_tomorrow').length,2);
+  const uncertain=f.data.flowNotifications.find(n=>n.kind==='live_tomorrow'&&n.recipient==='A');
+  uncertain.state='sending';uncertain.leaseId='expired';uncertain.leaseUntil=f.now()-1;
+  f.data.flowNotifications.find(n=>n.kind==='live_tomorrow'&&n.recipient==='B').state='superseded';
+  let posts=0;
+  const sender=new FlowFeishu(f.job.runtime.store,{people:f.job.runtime.people,clock:f.now,...permitOptions(f),
+    env:{FLOW_NOTIFICATIONS_ENABLED:'true',FEISHU_APP_ID:'test',FEISHU_APP_SECRET:'test',FEISHU_RECIPIENT_MAP_JSON:JSON.stringify({A:'ou_anchor'})},
+    fetchImpl:async()=>{posts++;throw Error('must not POST');}});
+  await sender.flush();
+  assert.equal(posts,0);
+  assert.equal(uncertain.state,'attention');
+  assert.equal(uncertain.unknown,true);
+});
+
+test('an old volume permit cannot authorize a new Hub process or build at 16:00',async()=>{
+  const f=fixture();
+  const replaced=new LiveNextDayReminder({runtime:f.job.runtime,liveSessions:f.job.liveSessions,notifier:f.job.notifier,
+    readReleasePermit:f.job.readReleasePermit,releaseId:f.job.releaseId,bootId:'boot-restarted-instance',
+    enabled:true,clock:f.now});
+  await replaced.tick();
+  assert.equal(f.data.flowNotifications.filter(n=>n.kind==='live_tomorrow').length,0);
+  await f.job.tick();
+  assert.equal(f.data.flowNotifications.filter(n=>n.kind==='live_tomorrow').length,2);
+  f.data.flowNotifications.find(n=>n.kind==='live_tomorrow'&&n.recipient==='B').state='superseded';
+  let posts=0;
+  const replacementSender=new FlowFeishu(f.job.runtime.store,{people:f.job.runtime.people,clock:f.now,
+    ...permitOptions(f),bootId:'boot-restarted-instance',
+    env:{FLOW_NOTIFICATIONS_ENABLED:'true',FEISHU_APP_ID:'test',FEISHU_APP_SECRET:'test',FEISHU_RECIPIENT_MAP_JSON:JSON.stringify({A:'ou_anchor'})},
+    fetchImpl:async()=>{posts++;throw Error('must not POST');}});
+  await replacementSender.flush();
+  assert.equal(posts,0);
+  assert.equal(f.data.flowNotifications.find(n=>n.kind==='live_tomorrow'&&n.recipient==='A').state,'superseded');
+  const wrongBuild=new LiveNextDayReminder({runtime:f.job.runtime,liveSessions:f.job.liveSessions,notifier:f.job.notifier,
+    readReleasePermit:f.job.readReleasePermit,releaseId:'hub-r63-different-build',bootId:f.job.bootId,
+    enabled:true,clock:f.now});
+  await wrongBuild.tick();
+  assert.equal(f.data.flowNotifications.filter(n=>n.kind==='live_tomorrow').length,2);
+});
+
+test('an absent production RELEASE_ID fallback of local blocks enqueue and transport',async()=>{
+  const f=fixture();
+  const formalRelease=f.job.releaseId;
+  f.job.releaseId='local';
+  await f.job.tick();
+  assert.equal(f.data.flowNotifications.filter(n=>n.kind.startsWith('live_tomorrow')).length,0);
+  assert.equal(f.data.liveNextDayStatus.state,'attention');
+  f.job.releaseId=formalRelease;
+  f.advance();
+  await f.job.tick();
+  const direct=f.data.flowNotifications.find(n=>n.kind==='live_tomorrow'&&n.recipient==='A');
+  assert.ok(direct);
+  f.data.flowNotifications.find(n=>n.kind==='live_tomorrow'&&n.recipient==='B').state='superseded';
+  let posts=0;
+  const sender=new FlowFeishu(f.job.runtime.store,{people:f.job.runtime.people,clock:f.now,
+    ...permitOptions(f),releaseId:'local',
+    env:{FLOW_NOTIFICATIONS_ENABLED:'true',FEISHU_APP_ID:'test',FEISHU_APP_SECRET:'test',FEISHU_RECIPIENT_MAP_JSON:JSON.stringify({A:'ou_anchor'})},
+    fetchImpl:async()=>{posts++;throw Error('must not POST');}});
+  await sender.flush();
+  assert.equal(posts,0);
+  assert.equal(direct.state,'superseded');
+});
 
 test('next-day messages are queued once; group confirms only after delivery and real acknowledgements',async()=>{
   const f=fixture();await f.job.tick();
@@ -108,9 +336,9 @@ test('formal live assignment, today, ready and returned cards recheck the offici
     if(kind==='live_today'){f.setNow('2026-09-25T08:00:00+08:00');notice.businessDate='2026-09-25';}
     assert.equal(needsOfficialLiveSource(notice,f.data.tasks[0]),true);
     const originalRead=f.job.liveSessions.readSchedule,sent=[];
-    const sender=new FlowFeishu(f.job.runtime.store,{people:f.job.runtime.people,clock:f.now,
+    const sender=new FlowFeishu(f.job.runtime.store,{people:f.job.runtime.people,clock:f.now,...permitOptions(f),
       env:{FLOW_NOTIFICATIONS_ENABLED:'true',FEISHU_APP_ID:'test',FEISHU_APP_SECRET:'test',FEISHU_RECIPIENT_MAP_JSON:JSON.stringify({A:'ou_anchor',B:'ou_assistant'})},
-      verifyLiveNoticeSource:row=>currentOfficialNextDaySource(row,{runtime:f.job.runtime,liveSessions:f.job.liveSessions,clock:f.now}),
+      verifyLiveNoticeSource:row=>verifySource(f,row),
       fetchImpl:async(url)=>{if(url.includes('/im/v1/messages'))sent.push(url);return Response.json({code:0,data:{message_id:'om_unexpected'}});}});
     let releaseToken;
     sender.tenantToken=()=>new Promise(resolve=>{releaseToken=resolve;});
@@ -134,9 +362,9 @@ test('a source-unreadable live card stays attention and manual retry cannot POST
   notice.state='ready';notice.kind='live_assignment';notice.nextAt=f.now();
   f.job.liveSessions.readSchedule=async()=>{throw new Error('official sheet unavailable');};
   let posts=0;
-  const sender=new FlowFeishu(f.job.runtime.store,{people:f.job.runtime.people,clock:f.now,
+  const sender=new FlowFeishu(f.job.runtime.store,{people:f.job.runtime.people,clock:f.now,...permitOptions(f),
     env:{FLOW_NOTIFICATIONS_ENABLED:'true',FEISHU_APP_ID:'test',FEISHU_APP_SECRET:'test',FEISHU_RECIPIENT_MAP_JSON:JSON.stringify({A:'ou_anchor',B:'ou_assistant'})},
-    verifyLiveNoticeSource:row=>currentOfficialNextDaySource(row,{runtime:f.job.runtime,liveSessions:f.job.liveSessions,clock:f.now}),
+    verifyLiveNoticeSource:row=>verifySource(f,row),
     fetchImpl:async(url)=>{if(url.includes('/im/v1/messages'))posts++;return Response.json({code:0,data:{message_id:'om_unexpected'}});}});
   sender.token={value:'token',until:f.now()+3600000};
   await sender.flush();
@@ -150,11 +378,11 @@ test('a source-unreadable live card stays attention and manual retry cannot POST
 test('a current formal live card is allowed, while a source-change alert needs no current shift',async()=>{
   const f=fixture(),card=f.data.flowNotifications.find(n=>n.recipient==='A');
   card.state='ready';card.nextAt=f.now();
-  assert.equal(await currentOfficialNextDaySource(card,{runtime:f.job.runtime,liveSessions:f.job.liveSessions,clock:f.now}),true);
+  assert.equal(await verifySource(f,card),true);
   const alert={...card,kind:'live_source_changed'};
   f.job.liveSessions.readSchedule=async()=>{throw new Error('official sheet unavailable');};
   assert.equal(needsOfficialLiveSource(alert,f.data.tasks[0]),false);
-  assert.equal(await currentOfficialNextDaySource(alert,{runtime:f.job.runtime,liveSessions:f.job.liveSessions,clock:f.now}),true);
+  assert.equal(await verifySource(f,alert),true);
 });
 
 test('manager source-change alert still sends when the official sheet cannot be read',async()=>{
@@ -164,9 +392,9 @@ test('manager source-change alert still sends when the official sheet cannot be 
   f.data.flowNotifications.push(alert);
   f.job.liveSessions.readSchedule=async()=>{throw new Error('official sheet unavailable');};
   let posts=0;
-  const sender=new FlowFeishu(f.job.runtime.store,{people:f.job.runtime.people,clock:f.now,
+  const sender=new FlowFeishu(f.job.runtime.store,{people:f.job.runtime.people,clock:f.now,...permitOptions(f),
     env:{FLOW_NOTIFICATIONS_ENABLED:'true',FEISHU_APP_ID:'test',FEISHU_APP_SECRET:'test',FEISHU_RECIPIENT_MAP_JSON:JSON.stringify({A:'ou_anchor',B:'ou_assistant'})},
-    verifyLiveNoticeSource:row=>currentOfficialNextDaySource(row,{runtime:f.job.runtime,liveSessions:f.job.liveSessions,clock:f.now}),
+    verifyLiveNoticeSource:row=>verifySource(f,row),
     fetchImpl:async(url)=>{if(url.includes('/im/v1/messages'))posts++;return Response.json({code:0,data:{message_id:'om_source_alert'}});}});
   sender.token={value:'token',until:f.now()+3600000};
   await sender.flush();
@@ -211,6 +439,10 @@ test('a new execution attempt gets a fresh reminder and cannot reuse the old gro
   f.data.flowNotifications.push({id:'card-retry',taskId:'T1',nodeId:f.nodes[0].id,attempt:2,recipient:'A',kind:'live_assignment',state:'sent',messageId:'om_card_retry'});
   f.nodes[0].liveAcknowledgements=[{kind:'live_ack',attempt:1,by:'A',at:new Date(f.now()).toISOString()}];
   assert.equal(currentNextDayGroup(previous,f.data,f.now()),false);
+  f.advance();await f.job.tick();
+  assert.deepEqual(f.data.flowNotifications.filter(n=>n.kind==='live_tomorrow'&&n.recipient==='A').map(n=>n.attempt),[1],
+    'a changed attempt is blocked until the whole release claim is independently renewed');
+  await f.rearm();
   f.advance();await f.job.tick();
   const fresh=f.data.flowNotifications.filter(n=>n.kind==='live_tomorrow'&&n.recipient==='A');
   assert.deepEqual(fresh.map(n=>n.attempt),[1,2]);
@@ -276,7 +508,11 @@ test('assistant-time correction preserves formal task signature but invalidates 
   };
   const changed=await f.job.liveSessions.readSchedule();
   assert.equal(scheduleSessions(changed,changed.date,f.job.runtime.people(),f.now(),f.job.runtime.liveParticipants)[0].signature,f.slot.signature);
-  assert.equal(await currentOfficialNextDaySource(old,{runtime:f.job.runtime,liveSessions:f.job.liveSessions,clock:f.now}),false);
+  assert.equal(await verifySource(f,old),false);
+  f.advance();await f.job.tick();
+  assert.equal(f.data.flowNotifications.filter(n=>n.kind==='live_tomorrow'&&n.recipient==='B').length,1,
+    'a corrected time cannot reuse the old source permit');
+  await f.rearm();
   f.advance();await f.job.tick();
   const notices=f.data.flowNotifications.filter(n=>n.kind==='live_tomorrow'&&n.recipient==='B');
   assert.equal(notices.length,2);
@@ -290,10 +526,10 @@ test('confirmed group notice routes to the exact approved Feishu chat with a sta
   f.nodes.forEach(n=>n.liveAcknowledgements=[{kind:'live_ack',attempt:n.attempt,by:n.owner.number,at:new Date(f.now()).toISOString()}]);
   f.advance();await f.job.tick();
   const sent=[];
-  const sender=new FlowFeishu(f.job.runtime.store,{people:()=>[],clock:f.now,env:{FLOW_NOTIFICATIONS_ENABLED:'true',FEISHU_APP_ID:'test',FEISHU_APP_SECRET:'test',FLOW_LIVE_WAR_ROOM_CHAT_ID:'oc_3f92ef62d6160399ee823e74def199e6'},fetchImpl:async(url,options)=>{
+  const sender=new FlowFeishu(f.job.runtime.store,{people:()=>[],clock:f.now,...permitOptions(f),env:{FLOW_NOTIFICATIONS_ENABLED:'true',FEISHU_APP_ID:'test',FEISHU_APP_SECRET:'test',FLOW_LIVE_WAR_ROOM_CHAT_ID:'oc_3f92ef62d6160399ee823e74def199e6'},fetchImpl:async(url,options)=>{
     if(url.includes('/auth/'))return Response.json({code:0,tenant_access_token:'token',expire:7200});
     sent.push({url,body:JSON.parse(options.body)});return Response.json({code:0,data:{message_id:'om_group'}});
-  },verifyLiveNoticeSource:()=>currentOfficialNextDaySource(f.data.flowNotifications.find(n=>n.kind==='live_tomorrow_group_confirmed'),{runtime:f.job.runtime,liveSessions:f.job.liveSessions,clock:f.now})});
+  },verifyLiveNoticeSource:()=>verifySource(f,f.data.flowNotifications.find(n=>n.kind==='live_tomorrow_group_confirmed'))});
   assert.equal(sender.recipient(LIVE_WAR_ROOM_RECIPIENT).type,'chat_id');
   await sender.flush();
   assert.equal(sent.length,1);
@@ -304,9 +540,9 @@ test('confirmed group notice routes to the exact approved Feishu chat with a sta
 
 async function flushAfterTokenWait(f,mutate,{map={}}={}){
   const sent=[];
-  const sender=new FlowFeishu(f.job.runtime.store,{people:f.job.runtime.people,clock:f.now,
+  const sender=new FlowFeishu(f.job.runtime.store,{people:f.job.runtime.people,clock:f.now,...permitOptions(f),
     env:{FLOW_NOTIFICATIONS_ENABLED:'true',FEISHU_APP_ID:'test',FEISHU_APP_SECRET:'test',FLOW_LIVE_WAR_ROOM_CHAT_ID:'oc_3f92ef62d6160399ee823e74def199e6',FEISHU_RECIPIENT_MAP_JSON:JSON.stringify(map)},
-    verifyLiveNoticeSource:notice=>currentOfficialNextDaySource(notice,{runtime:f.job.runtime,liveSessions:f.job.liveSessions,clock:f.now}),
+    verifyLiveNoticeSource:notice=>verifySource(f,notice),
     fetchImpl:async(url)=>{if(url.includes('/im/v1/messages'))sent.push(url);return Response.json({code:0,data:{message_id:'om_unexpected'}});}});
   let releaseToken;
   sender.tenantToken=()=>new Promise(resolve=>{releaseToken=resolve;});
@@ -347,6 +583,21 @@ test('group summary cannot POST after an official-sheet edit that the persisted 
   assert.equal(pending.state,'attention');
 });
 
+test('a duplicate group member reference cannot replace an omitted person or POST',async()=>{
+  const f=fixture();await f.job.tick();
+  f.data.flowNotifications.filter(n=>n.kind==='live_tomorrow').forEach((n,i)=>{n.state='sent';n.messageId=`om_direct_${i}`;});
+  f.advance();await f.job.tick();
+  const pending=f.data.flowNotifications.find(n=>n.kind==='live_tomorrow_group_pending');assert.ok(pending);
+  assert.equal(currentNextDayRelease(f.permit,{manifest:f.manifest,notice:pending,now:f.now(),
+    releaseId:f.job.releaseId,bootId:f.job.bootId}),true);
+  pending.related[1]={...pending.related[0]};
+  assert.equal(currentNextDayRelease(f.permit,{manifest:f.manifest,notice:pending,now:f.now(),
+    releaseId:f.job.releaseId,bootId:f.job.bootId}),false);
+  const sent=await flushAfterTokenWait(f,()=>{});
+  assert.deepEqual(sent,[]);
+  assert.equal(pending.state,'attention');
+});
+
 test('pending group is superseded if everyone confirms while token is being obtained',async()=>{
   const f=fixture();await f.job.tick();
   f.data.flowNotifications.filter(n=>n.kind==='live_tomorrow').forEach((n,i)=>{n.state='sent';n.messageId=`om_direct_${i}`;});
@@ -368,7 +619,7 @@ test('direct reminder is superseded if the owner, attempt or Feishu recipient ch
       if(change==='recipient')sender.map.A='ou_changed';
     },{map:{A:'ou_anchor',B:'ou_assistant'}});
     assert.deepEqual(sent,[],change);
-    assert.equal(direct.state,'superseded',change);
+    assert.equal(direct.state,change==='recipient'?'superseded':'attention',change);
   }
 });
 
@@ -377,10 +628,13 @@ test('token wait crossing 17:00 cannot POST an otherwise valid direct reminder',
   f.data.flowNotifications.find(n=>n.kind==='live_tomorrow'&&n.recipient==='B').state='superseded';
   const direct=f.data.flowNotifications.find(n=>n.kind==='live_tomorrow'&&n.recipient==='A');
   f.setNow('2026-09-24T16:59:59+08:00');
+  f.permit.issuedAt='2026-09-24T08:45:00.000Z';
+  f.permit.expiresAt='2026-09-24T09:00:00.000Z';
   const sent=await flushAfterTokenWait(f,()=>f.setNow('2026-09-24T17:00:01+08:00'),
     {map:{A:'ou_anchor'}});
   assert.deepEqual(sent,[]);
-  assert.equal(direct.state,'superseded');
+  assert.equal(direct.state,'attention');
+  assert.equal(direct.unknown,false);
 });
 
 test('group confirmation is explicitly scoped to listed verified shifts if another room shift is added later',async()=>{
@@ -419,7 +673,7 @@ test('previously unknown group send becomes visible attention without acquiring 
   const confirmed=f.data.flowNotifications.find(n=>n.kind==='live_tomorrow_group_confirmed');assert.ok(confirmed);
   confirmed.unknown=true;confirmed.firstAttemptAt=new Date(f.now()-60000).toISOString();
   let tokenCalls=0,posts=0;
-  const sender=new FlowFeishu(f.job.runtime.store,{people:f.job.runtime.people,clock:f.now,
+  const sender=new FlowFeishu(f.job.runtime.store,{people:f.job.runtime.people,clock:f.now,...permitOptions(f),
     env:{FLOW_NOTIFICATIONS_ENABLED:'true',FEISHU_APP_ID:'test',FEISHU_APP_SECRET:'test',FLOW_LIVE_WAR_ROOM_CHAT_ID:'oc_3f92ef62d6160399ee823e74def199e6'},
     fetchImpl:async()=>{posts++;throw Error('must not POST');}});
   sender.tenantToken=async()=>{tokenCalls++;return 'token';};
@@ -439,7 +693,7 @@ test('stale unknown ready notice and expired sending lease both remain attention
     if(prior==='unknown-ready'){direct.unknown=true;direct.state='ready';direct.nextAt=f.now()+120000;}
     else{direct.state='sending';direct.leaseId='old-lease';direct.leaseUntil=f.now()-1;}
     let posts=0;
-    const sender=new FlowFeishu(f.job.runtime.store,{people:f.job.runtime.people,clock:f.now,env:{FLOW_NOTIFICATIONS_ENABLED:'true',FEISHU_APP_ID:'test',FEISHU_APP_SECRET:'test',FEISHU_RECIPIENT_MAP_JSON:JSON.stringify({A:'ou_anchor',B:'ou_assistant'})},fetchImpl:async()=>{posts++;throw Error('must not send')}});
+    const sender=new FlowFeishu(f.job.runtime.store,{people:f.job.runtime.people,clock:f.now,...permitOptions(f),env:{FLOW_NOTIFICATIONS_ENABLED:'true',FEISHU_APP_ID:'test',FEISHU_APP_SECRET:'test',FEISHU_RECIPIENT_MAP_JSON:JSON.stringify({A:'ou_anchor',B:'ou_assistant'})},fetchImpl:async()=>{posts++;throw Error('must not send')}});
     await sender.flush();await sender.flush();
     assert.equal(posts,0,prior);assert.equal(direct.state,'attention',prior);assert.equal(direct.unknown,true,prior);
     assert.match(direct.error,/发送结果不明.*人工核验/,prior);
@@ -455,7 +709,7 @@ test('unknown direct reminder near one-hour UUID boundary is held before token w
   f.setNow('2026-09-24T16:59:59+08:00');
   direct.unknown=true;direct.firstAttemptAt=new Date(f.now()-3599000).toISOString();
   let tokenCalls=0,posts=0;
-  const sender=new FlowFeishu(f.job.runtime.store,{people:f.job.runtime.people,clock:f.now,
+  const sender=new FlowFeishu(f.job.runtime.store,{people:f.job.runtime.people,clock:f.now,...permitOptions(f),
     env:{FLOW_NOTIFICATIONS_ENABLED:'true',FEISHU_APP_ID:'test',FEISHU_APP_SECRET:'test',FEISHU_RECIPIENT_MAP_JSON:JSON.stringify({A:'ou_anchor'})},
     fetchImpl:async()=>{posts++;throw Error('must not POST');}});
   sender.tenantToken=async()=>{tokenCalls++;f.setNow('2026-09-24T17:00:01+08:00');return 'token';};
@@ -472,9 +726,9 @@ test('uncertain next-day transport result remains attention after the first POST
   f.data.flowNotifications.find(n=>n.kind==='live_tomorrow'&&n.recipient==='B').state='superseded';
   const direct=f.data.flowNotifications.find(n=>n.kind==='live_tomorrow'&&n.recipient==='A');
   let posts=0;
-  const sender=new FlowFeishu(f.job.runtime.store,{people:f.job.runtime.people,clock:f.now,
+  const sender=new FlowFeishu(f.job.runtime.store,{people:f.job.runtime.people,clock:f.now,...permitOptions(f),
     env:{FLOW_NOTIFICATIONS_ENABLED:'true',FEISHU_APP_ID:'test',FEISHU_APP_SECRET:'test',FEISHU_RECIPIENT_MAP_JSON:JSON.stringify({A:'ou_anchor'})},
-    verifyLiveNoticeSource:notice=>currentOfficialNextDaySource(notice,{runtime:f.job.runtime,liveSessions:f.job.liveSessions,clock:f.now}),
+    verifyLiveNoticeSource:notice=>verifySource(f,notice),
     fetchImpl:async()=>{posts++;throw Error('transport result unknown');}});
   sender.tenantToken=async()=> 'token';
   await sender.flush();
@@ -504,12 +758,11 @@ test('success response without message ID is unknown and cannot retry any next-d
       if(notice!==target&&notice.state==='ready')notice.state='superseded';
     }
     let posts=0;
-    const sender=new FlowFeishu(f.job.runtime.store,{people:f.job.runtime.people,clock:f.now,
+    const sender=new FlowFeishu(f.job.runtime.store,{people:f.job.runtime.people,clock:f.now,...permitOptions(f),
       env:{FLOW_NOTIFICATIONS_ENABLED:'true',FEISHU_APP_ID:'test',FEISHU_APP_SECRET:'test',
         FEISHU_RECIPIENT_MAP_JSON:JSON.stringify({A:'ou_anchor',B:'ou_assistant'}),
         FLOW_LIVE_WAR_ROOM_CHAT_ID:'oc_3f92ef62d6160399ee823e74def199e6'},
-      verifyLiveNoticeSource:notice=>currentOfficialNextDaySource(notice,{
-        runtime:f.job.runtime,liveSessions:f.job.liveSessions,clock:f.now}),
+      verifyLiveNoticeSource:notice=>verifySource(f,notice),
       fetchImpl:async()=>{posts++;return Response.json({code:0,data:{}});}});
     sender.tenantToken=async()=> 'token';
     await sender.flush();

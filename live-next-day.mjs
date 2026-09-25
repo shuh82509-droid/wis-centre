@@ -1,6 +1,7 @@
 import {randomUUID,createHash} from 'node:crypto';
 import {scheduleSessions} from './live-session-flow.mjs';
 import {withinNextDaySendWindow} from './flow-notice-validity.mjs';
+import {currentNextDayRelease,nextDayReleaseManifest} from './live-next-day-release.mjs';
 
 export const LIVE_WAR_ROOM_RECIPIENT='__wis_live_war_room__';
 const localDate=ms=>new Date(ms+8*3600000).toISOString().slice(0,10);
@@ -67,7 +68,7 @@ export function currentNextDayGroup(notice,s,now){
 // persisted task can lag a sheet edit until the next auto-dispatch tick, so a
 // task/signature check alone does not prove the recipient is still scheduled.
 // This protects both next-day reminders and all source-bound live task cards.
-export async function currentOfficialNextDaySource(notice,{runtime,liveSessions,clock=Date.now}={}){
+export async function currentOfficialNextDaySource(notice,{runtime,liveSessions,notifier,readReleasePermit=()=>null,releaseId=null,bootId=null,clock=Date.now}={}){
   if(!runtime?.store)return false;
   const snapshot=runtime.store.read(),noticeTask=snapshot.tasks.find(t=>t.id===notice?.taskId);
   if(!needsOfficialLiveSource(notice,noticeTask))return true;
@@ -91,14 +92,21 @@ export async function currentOfficialNextDaySource(notice,{runtime,liveSessions,
     const slot=rooms.get(session.roomCode).find(s=>s.key===session.key);
     if(!slot||slot.signature!==ref.signature||nextDay&&(ref.shiftFingerprint!==assistantShiftFingerprint(slot)||![slot.anchor,...slot.assistants].includes(ref.recipient)))return false;
   }
+  if(nextDay){
+    try{
+      const manifest=nextDayReleaseManifest({raw,snapshot:current,people:runtime.people(),participants:runtime.liveParticipants,
+        recipient:number=>notifier?.recipient(number),date:businessDate,now:clock(),releaseId,bootId});
+      return currentNextDayRelease(readReleasePermit(),{manifest,notice,now:clock(),releaseId,bootId});
+    }catch{return false;}
+  }
   return true;
 }
 
 // The official sheet is read afresh. A task is required before a person may
 // receive a reminder; a missing or changed task is never silently recreated.
 export class LiveNextDayReminder {
-  constructor({runtime,liveSessions,notifier,clock=Date.now,enabled=false,sendHour=16}){
-    Object.assign(this,{runtime,liveSessions,notifier,clock,enabled,sendHour});this.running=false;this.nextAt=0;
+  constructor({runtime,liveSessions,notifier,readReleasePermit=()=>null,releaseId=null,bootId=null,clock=Date.now,enabled=false,sendHour=16}){
+    Object.assign(this,{runtime,liveSessions,notifier,readReleasePermit,releaseId,bootId,clock,enabled,sendHour});this.running=false;this.nextAt=0;
   }
   async tick(){
     const now=this.clock();
@@ -116,6 +124,13 @@ export class LiveNextDayReminder {
       }
       for(const issue of raw.issues||[])issues.push({room:issue.roomCode,message:issue.message});
       const snapshot=this.runtime.store.read(),verifiedRooms=[];
+      const release=()=>{
+        const permit=this.readReleasePermit();
+        const manifest=nextDayReleaseManifest({raw,snapshot:this.runtime.store.read(),people:this.runtime.people(),
+          participants:this.runtime.liveParticipants,recipient:number=>this.notifier.recipient(number),date,now:this.clock(),
+          releaseId:this.releaseId,bootId:this.bootId});
+        return currentNextDayRelease(permit,{manifest,now:this.clock(),releaseId:this.releaseId,bootId:this.bootId})?permit:null;
+      };
       for(const entry of rooms){
         const {room,slots}=entry;let eligible=true;
         for(const slot of slots){
@@ -131,12 +146,15 @@ export class LiveNextDayReminder {
         }
         if(eligible)verifiedRooms.push(entry);
       }
+      const permit=release();
+      if(!permit){issues.push({message:'次日正式通知尚无本日期、班表、任务及收件人一致的有效发布许可'});return;}
       // Fresh source/identity checks may have crossed the end of the hour.
       // Do not persist late notices that the sender must subsequently retire.
       if(!withinNextDaySendWindow(this.clock())){
         issues.push({message:'次日提醒发送窗口已过，本次不补发'});
         return;
       }
+      if(!release()){issues.push({message:'次日通知放行许可或正式来源在入队前失效'});return;}
       // One missing person's card blocks the whole room; a partial DM must
       // never imply that everyone can acknowledge the formal schedule.
       const needsWork=verifiedRooms.some(({slots})=>slots.some(slot=>{
@@ -148,6 +166,11 @@ export class LiveNextDayReminder {
       }));
       if(needsWork)this.runtime.store.transaction(s=>{
         this.runtime.ensure(s);
+        const currentManifest=nextDayReleaseManifest({raw,snapshot:s,people:this.runtime.people(),
+          participants:this.runtime.liveParticipants,recipient:number=>this.notifier.recipient(number),date,now:this.clock(),
+          releaseId:this.releaseId,bootId:this.bootId});
+        if(!currentNextDayRelease(this.readReleasePermit(),{manifest:currentManifest,now:this.clock(),
+          releaseId:this.releaseId,bootId:this.bootId}))return;
         for(const {slots} of verifiedRooms)for(const slot of slots){
           const task=s.tasks.find(t=>t.runtime?.liveSession?.key===slot.key&&t.runtime.liveSession.signature===slot.signature&&t.runtime.state==='running'&&!t.runtime.liveSession.sourceIssue);
           if(!task)continue;
@@ -159,6 +182,7 @@ export class LiveNextDayReminder {
             this.runtime.notify(s,task,node,'live_tomorrow',recipient,`next-day:${date}:${shiftFingerprint}`);
             const notice=s.flowNotifications.at(-1);
             notice.businessDate=date;notice.signature=slot.signature;notice.shiftFingerprint=shiftFingerprint;notice.roomCode=slot.roomCode;
+            notice.releaseScopeHash=permit.scopeHash;
             notice.delivery={channel:'live_tomorrow_text',msg_type:'text',content:JSON.stringify({text:nextDayDirectMessage(slot,recipient,recipient===slot.anchor?'anchor':'assistant',person.name)})};
           }
         }
@@ -176,6 +200,11 @@ export class LiveNextDayReminder {
       });
       if(groupDue)this.runtime.store.transaction(s=>{
         this.runtime.ensure(s);
+        const currentManifest=nextDayReleaseManifest({raw,snapshot:s,people:this.runtime.people(),
+          participants:this.runtime.liveParticipants,recipient:number=>this.notifier.recipient(number),date,now:this.clock(),
+          releaseId:this.releaseId,bootId:this.bootId});
+        if(!currentNextDayRelease(this.readReleasePermit(),{manifest:currentManifest,now:this.clock(),
+          releaseId:this.releaseId,bootId:this.bootId}))return;
         for(const {room,slots} of verifiedRooms){
           if(blockedRoom(room))continue;
           const refs=related(s,slots);
@@ -189,7 +218,7 @@ export class LiveNextDayReminder {
             if(s.flowNotifications.some(n=>n.key===key))continue;
             const draft={kind,businessDate:date,related:refs};
             if(!currentNextDayGroup(draft,s,now))continue;
-            s.flowNotifications.push({id:`notice_${randomUUID()}`,key,taskId:first.id,nodeId:null,attempt:0,kind,recipient:LIVE_WAR_ROOM_RECIPIENT,state:'ready',attempts:0,nextAt:now,createdAt:new Date(now).toISOString(),messageId:null,businessDate:date,related:refs,delivery:{channel:'live_tomorrow_group',msg_type:'text',content:JSON.stringify({text:`${title(room.name,date,confirmed?'以下已核验班次人员已确认':'以下已核验班次人员已通知（待确认）')}\n本消息仅汇总以下已核验班次；正式班表后续新增或调整的其他班次，以后续通知为准。\n${lines.join('\n')}\n${confirmed?'以下列出的班次，主播及助理均已在本人派工卡确认收到，请准时开播！':'以下列出的班次，次日提醒已送达，等待主播及助理本人确认；请以卡片回执为准。'}`})}});
+            s.flowNotifications.push({id:`notice_${randomUUID()}`,key,taskId:first.id,nodeId:null,attempt:0,kind,recipient:LIVE_WAR_ROOM_RECIPIENT,state:'ready',attempts:0,nextAt:now,createdAt:new Date(now).toISOString(),messageId:null,businessDate:date,roomCode:room.code,releaseScopeHash:permit.scopeHash,related:refs,delivery:{channel:'live_tomorrow_group',msg_type:'text',content:JSON.stringify({text:`${title(room.name,date,confirmed?'以下已核验班次人员已确认':'以下已核验班次人员已通知（待确认）')}\n本消息仅汇总以下已核验班次；正式班表后续新增或调整的其他班次，以后续通知为准。\n${lines.join('\n')}\n${confirmed?'以下列出的班次，主播及助理均已在本人派工卡确认收到，请准时开播！':'以下列出的班次，次日提醒已送达，等待主播及助理本人确认；请以卡片回执为准。'}`})}});
           }
         }
       });

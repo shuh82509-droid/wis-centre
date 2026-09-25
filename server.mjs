@@ -3,7 +3,7 @@ import { createReadStream, existsSync, mkdirSync, readFileSync, renameSync, stat
 import { spawn } from "node:child_process";
 import {startSourceScheduler} from './source-scheduler.mjs';
 import { createServer } from "node:http";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { previewMemberDirectory } from "./preview-directory.mjs";
@@ -24,6 +24,7 @@ import { LiveSessionFlow } from './live-session-flow.mjs';
 import { createOfficialLiveScheduleReader } from './live-official-schedule.mjs';
 import { LiveAutoDispatch } from './live-auto-dispatch.mjs';
 import { LiveNextDayReminder, currentOfficialNextDaySource } from './live-next-day.mjs';
+import {isolatedNextDayPermitPath,readNextDayReleasePermit} from './live-next-day-release.mjs';
 import { createLiveScheduleReader } from './live-schedule-reader.mjs';
 import { FlowSources } from './flow-sources.mjs';
 import { FlowFeishu } from './flow-feishu.mjs';
@@ -54,6 +55,9 @@ const taskAttachmentRoot = join(dataRoot, "task-center-attachments");
 const taskCenterPilot = "AI营销中心";
 const port = Number(process.env.PORT || 3000);
 const release = process.env.RELEASE_ID || "local";
+// A fresh process gets a new ID. A permit left on the persistent volume from
+// the previous Hub/container cannot authorize a replacement after restart.
+const liveNextDayBootId = randomUUID();
 const fingerprint = "WIS品牌营销部中枢";
 const hubIntegratedMode = process.env.HUB_INTEGRATED_MODE === "1";
 if (hubIntegratedMode && !process.env.CENTRAL_AUTHORITY_BASE) {
@@ -3083,11 +3087,17 @@ async function handleApi(request, response, url) {
 const sparkLibraryHandler = createSparkLibraryHandler({ root: join(dataRoot, 'spark-library'),
   currentSession, previewFor: permissionPreviewFor, sendJson, readJson: readTaskJsonBody });
 const workflowStore = new WorkflowStore(taskCenterFile);
+// This path must be the separate read-only mount checked by the deployment
+// operator. An absent or legacy DATA_DIR path never authorizes a send.
+const liveNextDayPermitFile = isolatedNextDayPermitPath(process.env);
+const readLiveNextDayPermit = () => liveNextDayPermitFile?readNextDayReleasePermit(liveNextDayPermitFile):null;
 const flowSources = new FlowSources();
 let liveFeishuService=null;
 const flowRuntime = new FlowRuntime(workflowStore, {people:()=>liveFeishuService?.people(flowSources.people())||flowSources.people(),canNotify:number=>flowNotifier.canQueue(number)});
 const flowNotifier = new FlowFeishu(workflowStore, {people:()=>flowSources.people(),
-  verifyLiveNoticeSource:notice=>currentOfficialNextDaySource(notice,{runtime:flowRuntime,liveSessions})});
+  readNextDayPermit:readLiveNextDayPermit,releaseId:release,bootId:liveNextDayBootId,
+  verifyLiveNoticeSource:notice=>currentOfficialNextDaySource(notice,{runtime:flowRuntime,liveSessions,notifier:flowNotifier,
+    readReleasePermit:readLiveNextDayPermit,releaseId:release,bootId:liveNextDayBootId})});
 const flowAccessFor = payload => {
   const user=taskCenterUser(payload), enabled=(payload.workspace?.is_brand_department===true||payload.permissions?.manage_permissions===true)&&!inactiveWorkflowMembers.has(user.number)&&['director','manager','specialist'].includes(user.role)&&payload.access?.allowed_modules?.includes('workflow-engine')===true;
   return configurationAccess({user,enabled,canManage:enabled&&['director','manager'].includes(user.role),department:enabled&&user.role==='director'&&payload.workspace?.dashboard_scope==='department',modules:payload.access?.allowed_modules||[]},readConfigurationGrants(join(dataRoot,'flow-configuration-grants.json')),{inactive:inactiveWorkflowMembers.has(user.number)});
@@ -3097,7 +3107,9 @@ const flowBlueprints=new FlowBlueprints(flowRuntime);flowRuntime.blueprints=flow
 const flowAutomation=new FlowAutomation(flowRuntime,flowSources);
 const liveSessions=new LiveSessionFlow(flowRuntime,{enabled:process.env.FLOW_LIVE_SESSIONS_ENABLED==='true',readSchedule:process.env.FLOW_LIVE_OFFICIAL_SOURCE==='true'?createOfficialLiveScheduleReader({appId:process.env.FEISHU_APP_ID,appSecret:process.env.FEISHU_APP_SECRET}):process.env.HUB_INTEGRATED_MODE==='1'?createLiveScheduleReader({publicUrl:process.env.FLOW_PUBLIC_URL}):null});
 const liveAutoDispatch=new LiveAutoDispatch(liveSessions,{enabled:process.env.FLOW_LIVE_AUTO_DISPATCH==='true'&&process.env.FLOW_LIVE_OFFICIAL_SOURCE==='true'});
-const liveNextDayReminder=new LiveNextDayReminder({runtime:flowRuntime,liveSessions,notifier:flowNotifier,enabled:process.env.FLOW_LIVE_NEXT_DAY_NOTIFICATIONS==='true'&&process.env.FLOW_LIVE_OFFICIAL_SOURCE==='true'});
+const liveNextDayReminder=new LiveNextDayReminder({runtime:flowRuntime,liveSessions,notifier:flowNotifier,
+  readReleasePermit:readLiveNextDayPermit,releaseId:release,bootId:liveNextDayBootId,
+  enabled:process.env.FLOW_LIVE_NEXT_DAY_NOTIFICATIONS==='true'&&process.env.FLOW_LIVE_OFFICIAL_SOURCE==='true'});
 const flowExecution=workflowExecutionPolicy();
 liveFeishuService=new LiveFeishuService({runtime:flowRuntime,notifier:flowNotifier,liveSessions});
 const flowHandler=createFlowHandler({runtime:flowRuntime,creative:productionSources?.creative,creativeStatus:()=>productionSources?.status()||{},localBusinessStatus:()=>productionSources?.business.status()||{},liveSessions,automation:flowAutomation,blueprints:flowBlueprints,sources:flowSources,notifier:flowNotifier,evidenceReader:new FlowEvidence({sources:flowSources,readCloud:callAuthority}),delivery:new FlowDelivery({runtime:flowRuntime,readCloud:callAuthority,root:join(dataRoot,'flow-deliveries')}),currentSession,accessFor:flowAccessFor,previewFor:permissionPreviewFor,readJson:readTaskJsonBody,sendJson,writesEnabled:flowExecution.writesEnabled,writeAccounts:flowExecution.writeAccounts});
@@ -3127,7 +3139,8 @@ const workflowHandler = createWorkflowHandler({ engine: workflowEngine, assistan
 const server=createServer(shutdown.wrapHandler(async (request, response) => {
   const url = new URL(request.url || "/", "http://127.0.0.1");
   if (url.pathname === "/health") {
-    sendJson(response, 200, { ok: true, app: "wis-marketing-hub", release, fingerprint });
+    sendJson(response, 200, { ok: true, app: "wis-marketing-hub", release, fingerprint,
+      liveNextDayInstance:liveNextDayBootId });
     return;
   }
 
