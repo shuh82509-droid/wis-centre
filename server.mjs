@@ -24,7 +24,7 @@ import { LiveSessionFlow } from './live-session-flow.mjs';
 import { createOfficialLiveScheduleReader } from './live-official-schedule.mjs';
 import { LiveAutoDispatch } from './live-auto-dispatch.mjs';
 import { LiveNextDayReminder, currentOfficialNextDaySource } from './live-next-day.mjs';
-import {isolatedNextDayPermitPath,readNextDayReleasePermit} from './live-next-day-release.mjs';
+import {createNextDayReleaseReader,isolatedNextDayPermitPath} from './live-next-day-release.mjs';
 import { createLiveScheduleReader } from './live-schedule-reader.mjs';
 import { FlowSources } from './flow-sources.mjs';
 import { FlowFeishu } from './flow-feishu.mjs';
@@ -3090,7 +3090,11 @@ const workflowStore = new WorkflowStore(taskCenterFile);
 // This path must be the separate read-only mount checked by the deployment
 // operator. An absent or legacy DATA_DIR path never authorizes a send.
 const liveNextDayPermitFile = isolatedNextDayPermitPath(process.env);
-const readLiveNextDayPermit = () => liveNextDayPermitFile?readNextDayReleasePermit(liveNextDayPermitFile):null;
+// This public verification key is pinned with the candidate configuration.
+// Without it, or without a valid independently signed permit, the sender and
+// scheduler both remain OFF even if their legacy environment flag is ON.
+const readLiveNextDayPermit = liveNextDayPermitFile?createNextDayReleaseReader(liveNextDayPermitFile,
+  {publicKey:process.env.FLOW_LIVE_NEXT_DAY_VERIFY_KEY_B64,releaseId:release,bootId:liveNextDayBootId}):()=>null;
 const flowSources = new FlowSources();
 let liveFeishuService=null;
 const flowRuntime = new FlowRuntime(workflowStore, {people:()=>liveFeishuService?.people(flowSources.people())||flowSources.people(),canNotify:number=>flowNotifier.canQueue(number)});

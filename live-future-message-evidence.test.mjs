@@ -21,8 +21,18 @@ const notice=()=>({id:'future-notice',kind:'live_assignment',taskId:'future-task
   createdAt:new Date(start).toISOString(),attempts:0,messageId:null});
 
 function nativeCard(card){
-  const elements=card.body.elements[0].columns[0].elements.map(element=>({
-    property:{elements:[{property:{content:element.content}}]}}));
+  // Feishu's raw_card_content expands entities and turns line breaks into br nodes.
+  const elements=card.body.elements[0].columns[0].elements.map(element=>{
+    const expanded=element.content.replace(/&#(\d+);/gu,
+      (_,code)=>String.fromCharCode(Number(code)));
+    const parts=expanded.split('\n');
+    const native=[];
+    for(let i=0;i<parts.length;i++){
+      if(i)native.push({tag:'br',property:{}});
+      native.push({tag:'plain_text',property:{content:parts[i]}});
+    }
+    return {property:{elements:native}};
+  });
   return JSON.stringify({json_card:JSON.stringify({
     header:{property:{subtitle:{property:{content:card.header.subtitle.content}}}},
     body:{property:{elements:[{property:{columns:[{property:{elements}}]}}]}}})});
