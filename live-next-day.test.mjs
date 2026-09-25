@@ -7,10 +7,11 @@ import {FlowFeishu} from './flow-feishu.mjs';
 import {FlowRuntime} from './flow-runtime.mjs';
 import {NEXT_DAY_PERMIT_MOUNT,isolatedNextDayPermitPath,nextDayReleaseManifest,installNextDayReleasePermit,
   readNextDayReleasePermit,createNextDayReleaseReader,currentNextDayRelease} from './live-next-day-release.mjs';
-import {existsSync,mkdtempSync,readFileSync,readdirSync,statSync,unlinkSync,rmdirSync,writeFileSync} from 'node:fs';
+import {chmodSync,existsSync,mkdirSync,mkdtempSync,readFileSync,readdirSync,statSync,unlinkSync,rmdirSync,writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {generateKeyPairSync} from 'node:crypto';
+import {spawnSync} from 'node:child_process';
 
 function fixture(){
   let now=Date.parse('2026-09-24T16:00:00+08:00');
@@ -61,6 +62,11 @@ const verifySource=(f,notice)=>currentOfficialNextDaySource(notice,{runtime:f.jo
 const permitOptions=f=>({readNextDayPermit:f.job.readReleasePermit,releaseId:f.job.releaseId,bootId:f.job.bootId});
 const firstActivationAt=Date.parse('2026-09-24T15:54:00+08:00');
 const releaseManifestAt=(f,at)=>({...f.manifest,preparedAt:new Date(at-1000).toISOString()});
+const permitTestDirectory=prefix=>{
+  const dir=mkdtempSync(join(tmpdir(),prefix));
+  if(process.platform==='linux')chmodSync(dir,0o755);
+  return dir;
+};
 const releaseEvidence=(f,checkedAt)=>({operator:'FD-026222',scopeHash:f.manifest.scopeHash,
   sourceRevision:f.manifest.sourceRevision,gatewayReleaseId:f.manifest.releaseId,
   gatewayBootId:f.manifest.bootId,gatewayVerified:true,groupChatId:f.manifest.groupChatId,
@@ -80,7 +86,7 @@ test('only the exact isolated read-only mount path may be configured; no DATA_DI
 });
 
 test('a local release permit is atomically written only after exact external card and group readback',()=>{
-  const f=fixture(),dir=mkdtempSync(join(tmpdir(),'wis-next-day-permit-')),file=join(dir,'release.json');
+  const f=fixture(),dir=permitTestDirectory('wis-next-day-permit-'),file=join(dir,'release.json');
   const {privateKey,publicKey}=generateKeyPairSync('ed25519');
   const original=JSON.stringify(f.data);
   const checkedAt=firstActivationAt;
@@ -95,8 +101,8 @@ test('a local release permit is atomically written only after exact external car
     assert.equal(readNextDayReleasePermit(file),null,'missing verifier is always OFF');
     assert.deepEqual(readNextDayReleasePermit(file,{publicKey}),permit);
     if(process.platform==='linux'){
-      assert.equal(statSync(dir).mode&0o777,0o700);
-      assert.equal(statSync(file).mode&0o777,0o600);
+      assert.equal(statSync(dir).mode&0o777,0o755);
+      assert.equal(statSync(file).mode&0o777,0o644);
     }
     assert.equal(permit.businessDate,'2026-09-25');
     assert.equal(permit.groupChatId,'oc_3f92ef62d6160399ee823e74def199e6');
@@ -120,8 +126,35 @@ test('a local release permit is atomically written only after exact external car
   }finally{if(readNextDayReleasePermit(file,{publicKey}))unlinkSync(file);rmdirSync(dir);}
 });
 
+test('POSIX read-only permit mount is readable by a different Hub UID without exposing the private key',()=>{
+  const f=fixture(),root=permitTestDirectory('wis-next-day-cross-uid-');
+  const directory=join(root,'release'),file=join(directory,'permit.json');
+  const {privateKey,publicKey}=generateKeyPairSync('ed25519');
+  mkdirSync(directory,{mode:0o755});
+  if(process.platform==='linux')chmodSync(directory,0o755);
+  try{
+    const permit=installNextDayReleasePermit(file,{manifest:releaseManifestAt(f,firstActivationAt),
+      evidence:releaseEvidence(f,firstActivationAt),privateKey,clock:()=>firstActivationAt});
+    assert.deepEqual(readNextDayReleasePermit(file,{publicKey}),permit);
+    assert.deepEqual(readdirSync(directory),['permit.json'],'the private signing key is never written to the mounted directory');
+    if(process.platform==='linux'){
+      assert.equal(statSync(directory).mode&0o777,0o755);
+      assert.equal(statSync(file).mode&0o777,0o644);
+      assert.equal(statSync(directory).mode&0o001,0o001,'other UID can traverse');
+      assert.equal(statSync(file).mode&0o004,0o004,'other UID can read');
+      assert.equal(statSync(file).mode&0o002,0,'other UID cannot write');
+      if(process.getuid?.()===0){
+        const read=spawnSync(process.execPath,['-e',
+          "const fs=require('node:fs');const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));if(!p.signature)process.exit(3)",file],
+        {uid:10001,gid:10001,encoding:'utf8'});
+        assert.equal(read.status,0,read.stderr||'Hub UID10001 could not read the signed permit');
+      }
+    }
+  }finally{unlinkSync(file);rmdirSync(directory);rmdirSync(root);}
+});
+
 test('an already activated permit is not misreported as failed when lock cleanup fails',()=>{
-  const f=fixture(),dir=mkdtempSync(join(tmpdir(),'wis-next-day-lock-')),file=join(dir,'permit.json');
+  const f=fixture(),dir=permitTestDirectory('wis-next-day-lock-'),file=join(dir,'permit.json');
   const {privateKey,publicKey}=generateKeyPairSync('ed25519');
   let ticks=0;
   const previousLog=console.error;
@@ -138,7 +171,7 @@ test('an already activated permit is not misreported as failed when lock cleanup
 });
 
 test('signed permit is OFF for an absent key, wrong key, legacy format or changed field',()=>{
-  const f=fixture(),dir=mkdtempSync(join(tmpdir(),'wis-next-day-signed-')),file=join(dir,'permit.json');
+  const f=fixture(),dir=permitTestDirectory('wis-next-day-signed-'),file=join(dir,'permit.json');
   const pair=generateKeyPairSync('ed25519'),other=generateKeyPairSync('ed25519');
   const now=firstActivationAt,evidence=releaseEvidence(f,now);
   try{
@@ -162,7 +195,7 @@ test('signed permit is OFF for an absent key, wrong key, legacy format or change
 });
 
 test('a message ID alone cannot authorize a person: every card needs exact recipient readback',()=>{
-  const f=fixture(),dir=mkdtempSync(join(tmpdir(),'wis-next-day-recipient-')),file=join(dir,'permit.json');
+  const f=fixture(),dir=permitTestDirectory('wis-next-day-recipient-'),file=join(dir,'permit.json');
   const {privateKey}=generateKeyPairSync('ed25519'),now=firstActivationAt;
   const modify=[
     row=>{delete row.recipientReadback;},
@@ -186,7 +219,7 @@ test('a message ID alone cannot authorize a person: every card needs exact recip
 });
 
 test('a slow fsync crossing the first activation cutoff leaves no permit file',()=>{
-  const f=fixture(),dir=mkdtempSync(join(tmpdir(),'wis-next-day-cutoff-')),file=join(dir,'permit.json');
+  const f=fixture(),dir=permitTestDirectory('wis-next-day-cutoff-'),file=join(dir,'permit.json');
   const {privateKey,publicKey}=generateKeyPairSync('ed25519');
   const before=Date.parse('2026-09-24T15:54:59.900+08:00');
   const after=Date.parse('2026-09-24T15:55:00.001+08:00');
@@ -202,7 +235,7 @@ test('a slow fsync crossing the first activation cutoff leaves no permit file',(
 });
 
 test('a first permit after 15:55 and an expired renewal cannot catch up',()=>{
-  const f=fixture(),dir=mkdtempSync(join(tmpdir(),'wis-next-day-late-')),file=join(dir,'permit.json');
+  const f=fixture(),dir=permitTestDirectory('wis-next-day-late-'),file=join(dir,'permit.json');
   const {privateKey}=generateKeyPairSync('ed25519');
   const first=firstActivationAt,later=Date.parse('2026-09-24T16:30:00+08:00');
   try{
@@ -217,7 +250,7 @@ test('a first permit after 15:55 and an expired renewal cannot catch up',()=>{
 });
 
 test('same Hub rejects rollback to an older signed activation and clock rollback',()=>{
-  const f=fixture(),dir=mkdtempSync(join(tmpdir(),'wis-next-day-rollback-')),file=join(dir,'permit.json');
+  const f=fixture(),dir=permitTestDirectory('wis-next-day-rollback-'),file=join(dir,'permit.json');
   const {privateKey,publicKey}=generateKeyPairSync('ed25519');
   let now=firstActivationAt;
   try{
@@ -241,7 +274,7 @@ test('same Hub rejects rollback to an older signed activation and clock rollback
 });
 
 test('signed activation is permanently closed after local clock moves backward',()=>{
-  const f=fixture(),dir=mkdtempSync(join(tmpdir(),'wis-next-day-clock-')),file=join(dir,'permit.json');
+  const f=fixture(),dir=permitTestDirectory('wis-next-day-clock-'),file=join(dir,'permit.json');
   const {privateKey,publicKey}=generateKeyPairSync('ed25519');
   let now=firstActivationAt;
   try{
@@ -258,7 +291,7 @@ test('signed activation is permanently closed after local clock moves backward',
 });
 
 test('unactivated Hub queues nothing, then a signed permit is checked again before POST',async()=>{
-  const f=fixture(),dir=mkdtempSync(join(tmpdir(),'wis-next-day-gate-')),file=join(dir,'permit.json');
+  const f=fixture(),dir=permitTestDirectory('wis-next-day-gate-'),file=join(dir,'permit.json');
   const {privateKey,publicKey}=generateKeyPairSync('ed25519');
   const reader=createNextDayReleaseReader(file,{publicKey,releaseId:f.job.releaseId,
     bootId:f.job.bootId,clock:f.now});

@@ -1,5 +1,5 @@
 import {createHash,createPrivateKey,createPublicKey,randomUUID,sign,verify} from 'node:crypto';
-import {closeSync,existsSync,fsyncSync,mkdirSync,openSync,readFileSync,renameSync,unlinkSync,writeFileSync} from 'node:fs';
+import {closeSync,existsSync,fchmodSync,fsyncSync,lstatSync,mkdirSync,openSync,readFileSync,renameSync,unlinkSync,writeFileSync} from 'node:fs';
 import {dirname} from 'node:path';
 import {scheduleSessions} from './live-session-flow.mjs';
 import {requireFact} from './workflow-store.mjs';
@@ -161,7 +161,16 @@ export function installNextDayReleasePermit(file,{manifest,evidence,privateKey,c
     issuedAt:new Date(now).toISOString(),expiresAt:new Date(expiresAt).toISOString(),evidenceHash:sha(evidence),
     activationNonce:randomUUID()};
   permit.signature=sign(null,signingBytes(permit),signer).toString('base64url');
-  mkdirSync(dirname(file),{recursive:true,mode:0o700});
+  // The signed permit contains no secret; the private signing key must stay
+  // outside this directory. The Hub runs under a different UID and sees only
+  // a read-only bind mount, so it needs directory traversal and file read.
+  mkdirSync(dirname(file),{recursive:true,mode:0o755});
+  if(process.platform!=='win32'){
+    const directory=lstatSync(dirname(file));
+    requireFact(directory.isDirectory()&&!directory.isSymbolicLink()&&
+      (directory.mode&0o777)===0o755,
+    '许可目录必须是宿主拥有的 0755 实目录，供 Hub 只读跨 UID 读取',409);
+  }
   const guard=file+'.install.lock';let guardFd,temp,committed=false;
   try{
     guardFd=openSync(guard,'wx',0o600);
@@ -176,7 +185,11 @@ export function installNextDayReleasePermit(file,{manifest,evidence,privateKey,c
       '新的放行许可必须晚于上一份，禁止重用同一签发时刻',409);
     temp=file+'.'+process.pid+'.'+randomUUID()+'.tmp';
     const fd=openSync(temp,'wx',0o600);
-    try{writeFileSync(fd,JSON.stringify(permit));fsyncSync(fd);}finally{closeSync(fd);}
+    try{
+      writeFileSync(fd,JSON.stringify(permit));
+      if(process.platform!=='win32')fchmodSync(fd,0o644);
+      fsyncSync(fd);
+    }finally{closeSync(fd);}
     // This is the atomic activation commit point. A slow lock/fsync or host
     // pause must not slip the first permit past 15:55 or reuse stale evidence.
     const committedAt=clock(),firstActivation=!existing||Date.parse(existing.expiresAt)<=now;
