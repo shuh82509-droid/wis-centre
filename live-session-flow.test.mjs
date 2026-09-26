@@ -123,6 +123,39 @@ test('直播管理员仍可暂停、恢复、显式改派和退回，改派后�
  assert.equal(task.runtime.nodes.find(n=>n.id===first.id).state,'ready');
  assert.equal(task.runtime.nodes.find(n=>n.id===first.id).history.length,1);
 });
+test('正式场次来源待核验时服务端只允许暂停或取消，不准恢复、改派、退回或延期',async t=>{
+ const f=fixture(t),created=await f.create();
+ f.store.transaction(s=>{const task=s.tasks.find(row=>row.id===created.id);task.runtime.liveSession.sourceIssue='班表来源变化';task.version++;return true;});
+ let task=f.runtime.get(access(),created.id);
+ const initial=JSON.stringify(f.store.read());
+ for(const action of ['complete','resume','assign','return','extend']){
+  const body={expectedVersion:task.version,nodeId:task.runtime.nodes[0].id,note:'来源待核验时不得变更原任务',owner:'M',targetNodeId:task.runtime.nodes[0].id,dueAt:'2026-09-24T12:00:00+08:00',evidence,liveFacts:{confirmed:true}};
+  assert.throws(()=>f.runtime.command(access(),task.id,action,body,'source-issue-'+action),error=>error.status===409&&/场次来源待核验/.test(error.message),action);
+ }
+ assert.equal(JSON.stringify(f.store.read()),initial);
+ task=f.runtime.command(access(),task.id,'pause',{expectedVersion:task.version,note:'先暂停等待正式班表恢复'},'source-issue-pause');
+ assert.equal(task.runtime.state,'paused');
+ assert.ok(task.runtime.liveSession.sourceIssue);
+ assert.throws(()=>f.runtime.command(access(),task.id,'resume',{expectedVersion:task.version,note:'不能跳过正式来源恢复'},'source-issue-resume-after-pause'),/场次来源待核验/);
+ task=f.runtime.command(access(),task.id,'cancel',{expectedVersion:task.version,note:'原场次确需取消并保留记录'},'source-issue-cancel');
+ assert.equal(task.runtime.state,'cancelled');
+});
+test('直播节点主责不能直接调用主管退回，原节点和通知账本不变',async t=>{
+ const f=fixture(t);let task=await f.create();task=complete(f,task);
+ const ready=task.runtime.nodes.find(node=>node.state==='ready'&&node.owner.number!=='M');
+ assert.ok(ready);
+ const upstream=task.runtime.nodes.find(node=>node.state==='completed'&&ready.dependencies.includes(node.id));
+ assert.ok(upstream);
+ const before=JSON.stringify(f.store.read());
+ assert.throws(()=>f.runtime.command(access(ready.owner.number),task.id,'return',{expectedVersion:task.version,nodeId:ready.id,targetNodeId:upstream.id,note:'不能绕过主管退回'},'owner-return-denied'),error=>error.status===403&&/流程主管/.test(error.message));
+ assert.equal(JSON.stringify(f.store.read()),before);
+});
+test('结果不明后换新编号重复改派到现主责也不产生第二条通知',async t=>{
+ const f=fixture(t),task=await f.create(),ready=task.runtime.nodes.find(node=>node.state==='ready');
+ const before=JSON.stringify(f.store.read());
+ assert.throws(()=>f.runtime.command(access(),task.id,'assign',{expectedVersion:task.version,nodeId:ready.id,owner:ready.owner.number,note:'相同主责不得重复通知'},'duplicate-owner-new-key'),error=>error.status===409&&/不能重复改派/.test(error.message));
+ assert.equal(JSON.stringify(f.store.read()),before);
+});
 test('缺少正式场次来源的历史 W04 任务保留只读记录，不可由通用命令办理',t=>{
  const f=fixture(t),task=seedLegacyUnverifiedW04(f,'ordinary-live-001');
  assert.equal(task.runtime.liveSession,undefined);

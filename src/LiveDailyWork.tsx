@@ -1,6 +1,7 @@
 import {useEffect, useRef, useState, useSyncExternalStore} from 'react';
 import type {HubSession} from './types';
 import './live-daily-work.css';
+import './live-supervisor-correction.css';
 import {LiveCalendarAuthorization} from './LiveCalendarAuthorization';
 import {linkedLiveTaskRoute} from './moduleLocation';
 
@@ -9,7 +10,9 @@ type Item={taskId:string;version:number;title:string;state:string;taskUrl:string
 type Issue={roomCode?:string;roomName?:string;date?:string;message:string};
 type Today={date:string;generatedAt:string;enabled:boolean;canManage:boolean;items:Item[];dispatch?:{checkedAt:string;state:string;issues:Issue[]};reconciliationTasks?:{id:string;version:number;title:string;state:string;issue:string;taskUrl:string}[]};
 type RunNode=Item['node']&{owner:{number:string;name?:string};dependencies:string[];completedAt?:string;note?:string;history?:Array<{attempt:number;state:string;completedAt?:string;note?:string}>};
-type Run={id:string;version:number;title:string;runtime:{state:string;liveSession?:Slot;nodes:RunNode[]};flowEvents?:Array<{id:string;nodeId?:string|null;action:string;at:string;note?:string}>;notifications?:Array<{id:string;nodeId?:string|null;kind:string;recipient:string;state:string;messageId?:string|null;createdAt?:string;sentAt?:string;error?:string|null}>};
+type Run={id:string;workflow:string;version:number;title:string;runtime:{state:string;liveSession?:Slot;nodes:RunNode[]};flowEvents?:Array<{id:string;nodeId?:string|null;action:string;at:string;note?:string}>;notifications?:Array<{id:string;nodeId?:string|null;kind:string;recipient:string;state:string;messageId?:string|null;createdAt?:string;sentAt?:string;error?:string|null}>};
+type CorrectionAction='pause'|'resume'|'assign'|'return'|'cancel';
+type Correction={action:CorrectionAction;body:Record<string,unknown>;key:string;fromVersion:number};
 type Submission={path:string;body:Record<string,unknown>;key:string;label:string;item?:Item};
 const when=(s:string)=>new Date(s).toLocaleString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:false});
 const recordUrl=(taskId:string)=>{const url=new URL(window.location.href);url.hash=new URLSearchParams({module:'live-room-management',liveTask:taskId,liveView:'record'}).toString();return url.pathname+url.search+url.hash;};
@@ -20,28 +23,74 @@ async function request(path:string, options:RequestInit={}){
   if(!response.ok)throw Object.assign(new Error(result.detail||result.error||result.message||'请求未完成'),{status:response.status});
   return result;
 }
+function isOriginalLiveRun(value:unknown,taskId:string):value is Run{
+  if(!value||typeof value!=='object')return false;
+  const run=value as Partial<Run>,runtime=run.runtime;
+  return run.id===taskId&&run.workflow==='04'&&Number.isSafeInteger(run.version)&&typeof run.title==='string'
+    &&!!runtime&&typeof runtime==='object'&&typeof runtime.state==='string'&&Array.isArray(runtime.nodes)
+    &&runtime.nodes.every(node=>!!node&&typeof node.id==='string'&&typeof node.title==='string'&&typeof node.state==='string'
+      &&Number.isSafeInteger(node.attempt)&&!!node.owner&&typeof node.owner.number==='string'&&Array.isArray(node.dependencies))
+    &&!!runtime.liveSession&&typeof runtime.liveSession.date==='string'&&typeof runtime.liveSession.roomName==='string'
+    &&(run.flowEvents===undefined||Array.isArray(run.flowEvents))&&(run.notifications===undefined||Array.isArray(run.notifications));
+}
 export function LiveDailyWork({session,compact=false}:{session:HubSession;compact?:boolean}){
   const hash=useSyncExternalStore(subscribeHash,()=>window.location.hash,()=> '');
   const enabled=session.access.allowed_modules.includes('workflow-engine')&&session.access.allowed_modules.includes('live-room-management')&&!session.access.policy_state?.startsWith('development-preview');
   const route=linkedLiveTaskRoute(hash),linkedTask=route?.taskId||null;
   const scope=JSON.stringify([session.user.number,session.workspace.role,session.workspace.center,session.access.allowed_modules,session.access.policy_state,linkedTask,route?.view]);
   if(!enabled)return null;
-  if(route?.view==='record')return <LiveTaskRecord key={scope} taskId={route.taskId} compact={compact}/>;
+  if(route?.view==='record')return <LiveTaskRecord key={scope} taskId={route.taskId} compact={compact} managerCandidate={['manager','director'].includes(session.workspace.role)}/>;
   return <LiveWork key={scope} compact={compact} calendarAdmin={!!(session.permissions?.super_admin||session.permissions?.manage_permissions)} ownerNumber={session.user.number||''} linkedTask={linkedTask}/>;
 }
-function LiveTaskRecord({taskId,compact}:{taskId:string;compact:boolean}){
+function LiveTaskRecord({taskId,compact,managerCandidate=false}:{taskId:string;compact:boolean;managerCandidate?:boolean}){
   const [task,setTask]=useState<Run|null>(null),[error,setError]=useState(''),[loading,setLoading]=useState(true);
-  useEffect(()=>{let active=true;setTask(null);setError('');setLoading(true);void request('runs/'+taskId).then((result:Run)=>{if(!active)return;if(!result.runtime?.liveSession){setError('此任务不是正式直播场次，无法在直播只读详情中展示。');return;}setTask(result);}).catch(e=>{if(active)setError(e instanceof Error?e.message:'任务不存在或无权查看');}).finally(()=>{if(active)setLoading(false);});return()=>{active=false;};},[taskId]);
-  const content=<><header><div><h2>直播原任务记录（只读）</h2><p>仅展示当前账号有权查看的正式场次，不在此处办理或修改节点。</p></div><a href="#module=live-room-management">返回今日工作</a></header>
+  const [canManage,setCanManage]=useState(false),[busy,setBusy]=useState(false),[message,setMessage]=useState(''),[uncertain,setUncertain]=useState<Correction|null>(null);
+  useEffect(()=>{let active=true;setTask(null);setCanManage(false);setError('');setLoading(true);void request('runs/'+taskId).then(async(result:unknown)=>{if(!active)return;if(!isOriginalLiveRun(result,taskId)){setError('此任务不是可核验的正式直播场次，无法在直播原任务详情中展示。');return;}setTask(result);if(managerCandidate){try{const today:Today=await request('live/today');if(active)setCanManage(today.canManage===true);}catch{if(active)setCanManage(false);}}}).catch(e=>{if(active)setError(e instanceof Error?e.message:'任务不存在或无权查看');}).finally(()=>{if(active)setLoading(false);});return()=>{active=false;};},[taskId,managerCandidate]);
+  async function readBack(pending:Correction|null=uncertain){setBusy(true);try{const latest:unknown=await request('runs/'+taskId);if(!isOriginalLiveRun(latest,taskId))throw new Error('原任务读回响应异常，不能据此确认纠错结果。');setTask(latest);if(pending){setUncertain(pending);setMessage(latest.version!==pending.fromVersion?'原任务版本已变化，但不能据此证明本次纠错成功；继续冻结新操作，仅可沿用原编号查询结果。':'原任务版本未变化。如需核对结果，只能沿用同一次提交编号。');}}catch(e){setError((e instanceof Error?e.message:'原任务读回失败')+' 原提交编号仍保留，请勿另起操作或重发通知。');}finally{setBusy(false);}}
+  async function submitCorrection(correction:Correction){if(task?.workflow!=='04'||!task.runtime.liveSession||!canManage||busy||uncertain&&correction!==uncertain)return;setBusy(true);setError('');setMessage('');try{const result:unknown=await request(`runs/${task.id}/${correction.action}`,{method:'POST',headers:{'content-type':'application/json','x-flow-request':'1','idempotency-key':correction.key},body:JSON.stringify(correction.body)});if(!isOriginalLiveRun(result,task.id)||result.version<=correction.fromVersion)throw new Error('纠错响应不能证明原操作已保存，结果需要读回核实。');setTask(result);setUncertain(null);setMessage('主管纠错已保存。请核对下方事件及飞书通知账本；“已发送”不代表本人已读。');}catch(e){const status=(e as {status?:number}).status;if(!status||status>=500){setUncertain(correction);setError('提交结果不明。先读回原任务，不要另起一次操作或重发通知。');await readBack(correction);}else if(uncertain===correction){setError('原编号重试未确认成功，请保持冻结并核对原任务；不可另起操作或重发通知。');await readBack(correction);}else{setUncertain(null);setError(e instanceof Error?e.message:'纠错未完成');if(status===409)await readBack();}}finally{setBusy(false);}}
+  const content=<><header><div><h2>直播原任务记录</h2><p>仅展示当前账号有权查看的正式场次；节点完成必须由当前主责本人办理。</p></div><a href="#module=live-room-management">返回今日工作</a></header>
     {loading&&<p role="status">正在读取原任务…</p>}{error&&<p role="alert" className="live-work-alert">{error}</p>}
+    {message&&<p role="status">{message}</p>}
     {task&&<><p><strong>{task.title}</strong> · {task.runtime.liveSession?.date} · {task.runtime.liveSession?.roomName} · 任务状态 {task.runtime.state} · 版本 {task.version}</p>
       {task.runtime.liveSession?.sourceIssue&&<p className="live-work-alert">班表来源待核验：{task.runtime.liveSession.sourceIssue}</p>}
+      {canManage&&<SupervisorCorrection key={task.id+':'+task.version} task={task} busy={busy||!!uncertain} submit={submitCorrection}/>}
+      {canManage&&uncertain&&<div className="live-work-alert"><p>结果不明时禁止另起纠错操作或重发飞书通知。原任务版本变化也不能证明本次操作成功。</p><button type="button" disabled={busy} onClick={()=>void readBack()}>先读回原任务</button> <button type="button" disabled={busy} onClick={()=>void submitCorrection(uncertain)}>沿用原编号继续同一次提交</button></div>}
       <h3>节点办理记录</h3><ol>{task.runtime.nodes.map(node=><li key={node.id}><strong>{node.liveStage||node.title} · {node.title}</strong> · {node.state} · 主责 {node.owner.name||node.owner.number} · 第 {node.attempt} 次尝试{node.completedAt&&<> · 完成于 {when(node.completedAt)}</>}{node.note&&<p>完成结论：{node.note}</p>}{!!node.history?.length&&<details><summary>历史尝试 {node.history.length} 条</summary><ul>{node.history.map((row,i)=><li key={i}>第 {row.attempt} 次 · {row.state}{row.completedAt&&` · ${when(row.completedAt)}`}{row.note&&` · ${row.note}`}</li>)}</ul></details>}</li>)}</ol>
       <details><summary>任务事件 · {task.flowEvents?.length||0} 条</summary><ul>{task.flowEvents?.map(event=><li key={event.id}>{when(event.at)} · {event.nodeId||'任务'} · {event.action}{event.note&&` · ${event.note}`}</li>)}</ul></details>
       <details><summary>飞书通知账本 · {task.notifications?.length||0} 条</summary><p>“已发送”仅代表接口记录，不代表本人已读或确认；状态不明时请勿重复发送。</p><ul>{task.notifications?.map(notice=><li key={notice.id}>{notice.nodeId||'任务'} · {notice.kind} · 收件人 {notice.recipient} · {notice.state}{notice.sentAt&&` · ${when(notice.sentAt)}`}{notice.messageId&&` · 消息编号 ${notice.messageId}`}{notice.error&&` · ${notice.error}`}</li>)}</ul></details>
     </>}
   </>;
-  return <section className={'live-daily-work'+(compact?' live-daily-compact':'')} aria-label="直播原任务只读记录">{content}</section>;
+  return <section className={'live-daily-work'+(compact?' live-daily-compact':'')} aria-label="直播原任务记录">{content}</section>;
+}
+function completedUpstream(task:Run,node:RunNode){
+  const byId=new Map(task.runtime.nodes.map(row=>[row.id,row])),seen=new Set<string>(),visit=(id:string)=>{if(seen.has(id))return;seen.add(id);for(const parent of byId.get(id)?.dependencies||[])visit(parent);};
+  for(const parent of node.dependencies)visit(parent);
+  return task.runtime.nodes.filter(row=>seen.has(row.id)&&row.state==='completed');
+}
+function SupervisorCorrection({task,busy,submit}:{task:Run;busy:boolean;submit:(correction:Correction)=>Promise<void>}){
+  const running=task.runtime.state==='running',paused=task.runtime.state==='paused',sourceIssue=!!task.runtime.liveSession?.sourceIssue;
+  const assignable=task.runtime.nodes.filter(node=>node.state==='ready'||node.state==='pending');
+  const returnable=task.runtime.nodes.filter(node=>node.state==='ready'&&completedUpstream(task,node).length);
+  const actions:CorrectionAction[]=running?['pause',...(!sourceIssue&&assignable.length?['assign' as const]:[]),...(!sourceIssue&&returnable.length?['return' as const]:[]),'cancel']:paused?[...(!sourceIssue?['resume' as const]:[]),'cancel']:[];
+  const [action,setAction]=useState<CorrectionAction>(actions[0]||'pause'),[nodeId,setNodeId]=useState('');
+  const nodes=action==='return'?returnable:assignable,selected=nodes.find(node=>node.id===nodeId)||nodes[0],upstream=selected&&action==='return'?completedUpstream(task,selected):[];
+  if(task.workflow!=='04'||!task.runtime.liveSession||!actions.length)return null;
+  return <details className="live-supervisor-correction"><summary>主管纠错（仅正式场次）</summary>
+    <p>只处理原任务异常，不代替主播、助理或负责人完成节点；所有操作保留原版本、原因及通知账本。班表变更时先核验来源，不能直接恢复或改派。</p>
+    {sourceIssue&&<p className="live-work-alert">当前班表来源待核验；仅可暂停或终止原任务。若班次已变更，请终止后按正式班表明确创建替代任务。</p>}
+    <form key={task.id+':'+task.version+':'+action} aria-label="主管纠错" onSubmit={event=>{event.preventDefault();const form=new FormData(event.currentTarget),reason=String(form.get('note')||'').trim(),body:Record<string,unknown>={expectedVersion:task.version,note:reason};if(action==='assign'){body.nodeId=selected?.id;body.owner=String(form.get('owner')||'').trim();}if(action==='return'){body.nodeId=selected?.id;body.targetNodeId=String(form.get('targetNodeId')||'');}if(!actions.includes(action)||reason.length<4||action==='assign'&&(!selected||!body.owner)||action==='return'&&(!selected||!upstream.some(row=>row.id===body.targetNodeId)))return;
+      const names:{[K in CorrectionAction]:string}={pause:'暂停',resume:'恢复',assign:'改派',return:'退回',cancel:'终止'};
+      if(!window.confirm(`确认对 ${task.title} 执行“${names[action]}”？原任务版本 ${task.version}；不会代替本人完成节点，也不会自动补发结果不明的飞书通知。`))return;
+      void submit({action,body,key:crypto.randomUUID(),fromVersion:task.version});}}>
+      <fieldset disabled={busy}><label>纠错动作<select value={action} onChange={event=>{setAction(event.target.value as CorrectionAction);setNodeId('');}}>{actions.map(value=><option key={value} value={value}>{({pause:'暂停场次任务',resume:'恢复已暂停任务',assign:'明确改派未完成节点',return:'退回已完成的上游节点',cancel:'终止并保留原记录'} as const)[value]}</option>)}</select></label>
+      {(action==='assign'||action==='return')&&<label>操作节点<select value={selected?.id||''} onChange={event=>setNodeId(event.target.value)} required>{nodes.map(node=><option key={node.id} value={node.id}>{node.liveStage||node.title} · {node.title} · {node.owner.name||node.owner.number} · {node.state}</option>)}</select></label>}
+      {action==='assign'&&<label>新主责工号<input name="owner" required maxLength={60} placeholder="输入已核验在职且飞书可通知的本人工号"/><small>请先核对岗位、真实账号和班表。后端会再次校验在职、节点资格与飞书绑定。</small></label>}
+      {action==='return'&&<label>退回到已完成的上游节点<select name="targetNodeId" required>{upstream.map(node=><option key={node.id} value={node.id}>{node.liveStage||node.title} · {node.title} · 第 {node.attempt} 次</option>)}</select><small>上游原证据和历史尝试保留，受影响的下游将重新进入办理队列。</small></label>}
+      <label>纠错原因与核验依据<textarea name="note" required minLength={4} maxLength={1500}/></label>
+      <label><input type="checkbox" required/>我已核对正式场次、当前版本及人员；这是明确的主管纠错，不是代办或补发通知。</label>
+      <button type="submit">确认纠错并保留记录</button></fieldset>
+    </form>
+  </details>;
 }
 function LiveWork({compact,calendarAdmin,ownerNumber,linkedTask}:{compact:boolean;calendarAdmin:boolean;ownerNumber:string;linkedTask:string|null}){
   const [data,setData]=useState<Today|null>(null),[error,setError]=useState(''),[message,setMessage]=useState(''),[busy,setBusy]=useState(false);

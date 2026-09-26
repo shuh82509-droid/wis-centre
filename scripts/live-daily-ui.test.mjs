@@ -14,12 +14,12 @@ test('直播原任务记录使用独立只读组件，不复用办理表单',()=
 });
 test('只读记录仅 GET 本人可见任务，不展示业务提交控件',async()=>{
  const states=[],effects=[],requests=[],exports={};let index=0;
- const run={id:'task_future',version:8,title:'官旗正式场次',runtime:{state:'completed',liveSession:{date:'2026-09-27',roomName:'官旗'},nodes:[{id:'W04.S5.E2',title:'复盘与行动',liveStage:'复盘与行动',state:'completed',owner:{number:'SELF',name:'舒豪'},attempt:1,completedAt:'2026-09-27T10:00:00.000Z',note:'已复盘'}]},flowEvents:[{id:'event_1',at:'2026-09-27T10:00:00.000Z',action:'node_completed'}],notifications:[{id:'notice_1',state:'sent',recipient:'SELF',kind:'ready',messageId:'om_123'}]};
+ const run={id:'task_future',workflow:'04',version:8,title:'官旗正式场次',runtime:{state:'completed',liveSession:{date:'2026-09-27',roomName:'官旗'},nodes:[{id:'W04.S5.E2',title:'复盘与行动',liveStage:'复盘与行动',state:'completed',owner:{number:'SELF',name:'舒豪'},dependencies:[],attempt:1,completedAt:'2026-09-27T10:00:00.000Z',note:'已复盘'}]},flowEvents:[{id:'event_1',at:'2026-09-27T10:00:00.000Z',action:'node_completed'}],notifications:[{id:'notice_1',state:'sent',recipient:'SELF',kind:'ready',messageId:'om_123'}]};
  const ctx=vm.createContext({exports,URL,AbortSignal,window:{location:{hash:'#module=live-room-management&liveTask=task_future&liveView=record'}},fetch:async(path,options={})=>{requests.push([path,options.method||'GET']);return {ok:true,json:async()=>run};},require:n=>n==='react'?{useSyncExternalStore:(_subscribe,snapshot)=>snapshot(),useState:value=>{const at=index++;states[at]??=value;return [states[at],next=>{states[at]=typeof next==='function'?next(states[at]):next;}];},useEffect:effect=>effects.push(effect)}:n==='react/jsx-runtime'?{jsx:(type,props,key)=>({type,props,key}),jsxs:(type,props,key)=>({type,props,key})}:n==='./LiveCalendarAuthorization'?{LiveCalendarAuthorization:()=>null}:n==='./moduleLocation'?{linkedLiveTaskRoute}:n.endsWith('.css')?{}:(()=>{throw Error(n);})()});
  vm.runInContext(output,ctx);const record=exports.LiveDailyWork({session});const render=()=>{index=0;return record.type(record.props);};render();for(const effect of effects)effect();await new Promise(setImmediate);const tree=render();
  const nodes=[];const walk=node=>{if(!node||typeof node!=='object')return;nodes.push(node);for(const child of [node.props?.children].flat(Infinity))walk(child);};walk(tree);
  assert.deepEqual(requests.map(([path,method])=>[path,method]),[['api/flows/runs/task_future','GET']]);
- assert.ok(nodes.some(n=>n.type==='section'&&n.props['aria-label']==='直播原任务只读记录'));
+ assert.ok(nodes.some(n=>n.type==='section'&&n.props['aria-label']==='直播原任务记录'));
  assert.ok(!nodes.some(n=>n.type==='form'||n.type==='button'));
  assert.equal(states[0]?.id,'task_future');
 });
@@ -31,7 +31,7 @@ test('只读记录遇到无权查看时关闭，不泄露任务内容',async()=>
 });
 async function linkedRun({owner='SELF',state='running',sourceIssue='',live=true,nodeState='ready',conflict=false}={}){
  const states=[],effects=[],reads=[],posts=[],exports={};let index=0;
- const run={id:'task_future',version:5,title:'明日官旗正式场次',runtime:{state,nodes:[{id:'W04.S2.E1',title:'备播与排班',state:nodeState,liveStage:'备播与排班',owner:{number:owner},dependencies:[],attempt:1,plannedDueAt:'2026-09-26T01:00:00.000Z'}],...(live?{liveSession:{date:'2026-09-26',roomName:'官旗',sourceIssue,startAt:'2026-09-26T01:00:00.000Z'}}:{})}};
+ const run={id:'task_future',workflow:'04',version:5,title:'明日官旗正式场次',runtime:{state,nodes:[{id:'W04.S2.E1',title:'备播与排班',state:nodeState,liveStage:'备播与排班',owner:{number:owner},dependencies:[],attempt:1,plannedDueAt:'2026-09-26T01:00:00.000Z'}],...(live?{liveSession:{date:'2026-09-26',roomName:'官旗',sourceIssue,startAt:'2026-09-26T01:00:00.000Z'}}:{})}};
  const today={date:'2026-09-25',generatedAt:'2026-09-25T04:00:00.000Z',enabled:true,canManage:false,items:[]};
  const ctx=vm.createContext({exports,URL,URLSearchParams,AbortSignal,crypto:{randomUUID:()=> 'same-attempt'},document:{hidden:false},window:{location:{hash:'#module=live-room-management&liveTask=task_future',href:'https://hub.fandow.com/yxb/wis-marketing-hub/'},setInterval:()=>1,clearInterval:()=>{}},
    fetch:async(path,options={})=>{if(options.method==='POST'){posts.push(path);return {ok:!conflict,status:conflict?409:200,json:async()=>conflict?{detail:'原任务版本已变化'}:{ok:true}};}reads.push(path);return {ok:true,json:async()=>path.endsWith('live/today')?today:run};},

@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import {createFlowHandler} from './flow-http.mjs';
+import test from 'node:test';import assert from 'node:assert/strict';import {createFlowHandler} from './flow-http.mjs';import {WorkflowError} from './workflow-store.mjs';
 const manager={enabled:true,canManage:true,department:false,user:{number:'M',role:'manager',center:'A'},modules:['material-workbench']};
 function fixture({access=manager,preview=false,auth=200,writes=true}={}){let calls=0,result;const handler=createFlowHandler({runtime:{overview:()=>{calls++;return {tasks:[]};},create:()=>{calls++;return {id:'task_a'};}},sources:{},notifier:{status:()=>({})},currentSession:async()=>({status:auth,payload:{}}),accessFor:()=>access,previewFor:()=>({active:preview}),readJson:async()=>({}),sendJson:(_res,status,body)=>result={status,body},writesEnabled:writes});return {call:async(method,path,headers={})=>{await handler({method,headers}, {},new URL('https://example.com/api/flows/'+path));return {...result,calls};}};}
 test('未登录、权限预览与非品牌身份均不能读取真实任务',async()=>{for(const options of [{auth:401},{preview:true},{access:{...manager,enabled:false}}]){const f=fixture(options),r=await f.call('GET','overview');assert.ok([401,403].includes(r.status));assert.equal(r.calls,0);}});
@@ -15,4 +15,19 @@ test('直播节点非本人及无正式场次来源均在证据准备前拒绝',
  who='M';live=false;assert.equal((await send()).status,409);assert.deepEqual(calls,{source:1,evidence:1,command:1});
  for(const action of ['return','assign','extend','pause','resume','cancel'])assert.equal((await send(action)).status,409,action);
  assert.deepEqual(calls,{source:1,evidence:1,command:1});
+});
+test('主管恢复、改派、退回和延期均先新鲜核验正式场次；暂停取消不依赖来源',async()=>{
+ let result,sourceCalls=0,commandCalls=0,sourceChanged=true,currentAccess=manager;
+ const task={id:'task_live001',workflow:'04',center:'A',version:2,runtime:{liveSession:{key:'official-slot'},nodes:[{id:'W04.S2.E1',state:'ready',owner:{number:'L'}}]}};
+ const handler=createFlowHandler({runtime:{get:()=>task,command:()=>{commandCalls++;return task;}},sources:{},notifier:{status:()=>({})},liveSessions:{verifyCurrent:async()=>{sourceCalls++;if(sourceChanged)throw new WorkflowError(409,'班次来源已变化');}},currentSession:async()=>({status:200,payload:{}}),accessFor:()=>currentAccess,previewFor:()=>({active:false}),readJson:async()=>({expectedVersion:2,nodeId:'W04.S2.E1',note:'主管纠偏'}),sendJson:(_res,status,body)=>{result={status,body};}});
+ const send=async action=>{await handler({method:'POST',headers:{'x-flow-request':'1','content-type':'application/json','idempotency-key':'source-check-'+action}},{},new URL('https://example.com/api/flows/runs/task_live001/'+action));return result;};
+ for(const action of ['resume','assign','return','extend'])assert.equal((await send(action)).status,409,action);
+ assert.equal(sourceCalls,4);assert.equal(commandCalls,0);
+ for(const action of ['pause','cancel'])assert.equal((await send(action)).status,200,action);
+ assert.equal(sourceCalls,4);assert.equal(commandCalls,2);
+ sourceChanged=false;assert.equal((await send('assign')).status,200);assert.equal(sourceCalls,5);assert.equal(commandCalls,3);
+ currentAccess={...manager,canManage:false,user:{number:'OUTSIDER',role:'specialist',center:'B'}};
+ assert.equal((await send('assign')).status,403);assert.equal(sourceCalls,5);assert.equal(commandCalls,3);
+ currentAccess={...manager,canManage:false,user:{number:'L',role:'specialist',center:'A'}};
+ assert.equal((await send('return')).status,403);assert.equal(sourceCalls,5);assert.equal(commandCalls,3);
 });

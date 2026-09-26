@@ -1,0 +1,39 @@
+.live-supervisor-correction {
+  margin: 16px 0;
+  padding: 12px 16px;
+  border: 1px solid #c6d6df;
+  border-radius: 10px;
+  background: #f6fafc;
+}
+
+.live-supervisor-correction fieldset {
+  border: 0;
+  margin: 0;
+  padding: 0;
+}
+
+.live-supervisor-correction label {
+  display: block;
+  margin: 12px 0;
+}
+
+.live-supervisor-correction input:not([type='checkbox']),
+.live-supervisor-correction select,
+.live-supervisor-correction textarea {
+  display: block;
+  width: 100%;
+  max-width: 720px;
+  padding: 9px;
+  border: 1px solid #a9c3cf;
+  border-radius: 6px;
+  box-sizing: border-box;
+}
+
+.live-supervisor-correction textarea {
+  min-height: 80px;
+}
+
+.live-supervisor-correction small {
+  display: block;
+  margin-top: 4px;
+}
