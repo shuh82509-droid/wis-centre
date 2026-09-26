@@ -38,7 +38,9 @@ test('formal roster dispatch without OA login does not grant module or managemen
   assert.equal(runVisible(task,actor),true);assert.equal(runVisible(task,{...actor,channel:undefined}),false);
   assert.throws(()=>f.runtime.command(actor,task.id,'cancel',{nodeId:actor.nodeId,expectedVersion:task.version,note:'not allowed'},'try-cancel'),e=>e.status===403);
   const body={workflow:'04',options:{anchorMode:'existing'},owner:'TEST-0',manager:'M',title:'generic flow',acceptance:'test',sourceUrl:'https://example.com'};
-  assert.throws(()=>f.runtime.create(f.access('M'),body,'generic-create-no-grant'),e=>e.status===403);
+  const before={tasks:f.store.read().tasks.length,notices:f.store.read().flowNotifications.length};
+  assert.throws(()=>f.runtime.create(f.access('M'),body,'generic-create-no-source'),e=>e.status===409&&/正式班表/.test(e.message));
+  assert.deepEqual({tasks:f.store.read().tasks.length,notices:f.store.read().flowNotifications.length},before);
 });
 test('acknowledgement and exception preserve pending execution and notify only manager',async t=>{
   const f=await setup(t),messageId=f.sendReceipt('W04.S4.E1');

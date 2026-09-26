@@ -62,6 +62,11 @@ function fixture(t){
  return {store,runtime,live,raw,clock:()=>now,setNow:v=>now=Date.parse(v),async create(key='create-live-001'){const s=(await live.preview(access(),{},'2026-09-23')).sessions[0];return live.create(access(),{}, {date:s.date,sessionKey:s.key,signature:s.signature},key);}};
 }
 function complete(f,task,facts={confirmed:true},key){const node=task.runtime.nodes.find(n=>n.state==='ready');return f.runtime.command(access(node.owner.number),task.id,'complete',{expectedVersion:task.version,nodeId:node.id,note:'核对真实证据后确认',evidence,liveFacts:facts},key||'done-'+node.id+'-'+node.attempt);}
+function seedLegacyUnverifiedW04(f,key){
+ const prepared=f.runtime.create(access(),{workflow:'04',options:{anchorMode:'existing'},owner:'A',manager:'M',title:'历史直播档案',sourceUrl:'https://example.com/source',acceptance:'保留原记录'},'prepare-'+key,{prepareOnly:true,definition:{moduleOrder:[]},liveExecution:true});
+ f.store.transaction(s=>{f.runtime.ensure(s);s.tasks.push(prepared);f.runtime.log(s,prepared,null,'flow_started',access().user);f.runtime.route(s,prepared);return true;});
+ return f.runtime.get(access(),prepared.id);
+}
 
 test('只读备份、过期、日期错误、缺失人员和助理空档都阻止派工',t=>{
  const f=fixture(t);for(const mutate of [r=>r.recovery={readOnly:true},r=>r.updatedAt='2026-09-22T00:00:00Z',r=>r.date='2026-09-22',r=>r.rooms[0].anchors[0][2]='不存在',r=>r.rooms[0].assistants=[['09:30','12:00','助理']],r=>r.sourceStatus.test.found=false]){const raw=f.raw();mutate(raw);assert.throws(()=>scheduleSessions(raw,'2026-09-23',staff,f.clock()));}assert.equal(f.store.read().tasks.length,0);
@@ -118,12 +123,26 @@ test('直播管理员仍可暂停、恢复、显式改派和退回，改派后�
  assert.equal(task.runtime.nodes.find(n=>n.id===first.id).state,'ready');
  assert.equal(task.runtime.nodes.find(n=>n.id===first.id).history.length,1);
 });
-test('非正式直播流程保留现有管理员代办权限',t=>{
- const f=fixture(t),task=f.runtime.create(access(),{workflow:'04',options:{anchorMode:'existing'},owner:'A',manager:'M',title:'普通直播档案流程',sourceUrl:'https://example.com/source',acceptance:'资料完成可核验'},'ordinary-live-001');
+test('缺少正式场次来源的历史 W04 任务保留只读记录，不可由通用命令办理',t=>{
+ const f=fixture(t),task=seedLegacyUnverifiedW04(f,'ordinary-live-001');
  assert.equal(task.runtime.liveSession,undefined);
  assert.equal(task.runtime.nodes[0].owner.number,'A');
- const done=f.runtime.command(access('M'),task.id,'complete',{expectedVersion:task.version,nodeId:task.runtime.nodes[0].id,note:'现行管理权限提交',evidence},'ordinary-manager-done-001');
- assert.equal(done.runtime.nodes[0].completedBy.number,'M');
+ const original=JSON.stringify(f.store.read());
+ for(const action of ['complete','return','assign','extend','pause','resume','cancel']){
+  const body={expectedVersion:task.version,nodeId:task.runtime.nodes[0].id,note:'隔离验证不得办理',evidence,owner:'M',targetNodeId:task.runtime.nodes[0].id,dueAt:'2026-09-24T12:00:00+08:00'};
+  assert.throws(()=>f.runtime.command(access('M'),task.id,action,body,'ordinary-block-'+action),error=>error.status===409&&/缺少已核验/.test(error.message),action);
+ }
+ assert.equal(JSON.stringify(f.store.read()),original);
+});
+test('缺少正式场次来源的 W04 通知不能从通用队列重试',t=>{
+ const f=fixture(t),task=seedLegacyUnverifiedW04(f,'ordinary-live-notice-001');
+ const row=f.store.read().flowNotifications.find(n=>n.taskId===task.id);
+ assert.ok(row);
+ f.store.transaction(s=>{const notice=s.flowNotifications.find(n=>n.id===row.id);notice.state='attention';notice.unknown=false;return true;});
+ const sender=new FlowFeishu(f.store,{people:()=>staff,clock:f.clock});
+ const original=JSON.stringify(f.store.read());
+ assert.throws(()=>sender.retry(access('M'),row.id),error=>error.status===409&&/缺少已核验/.test(error.message));
+ assert.equal(JSON.stringify(f.store.read()),original);
 });
 test('重复派工、重复请求和重启保留同一任务及通知',async t=>{
  const f=fixture(t),first=await f.create();assert.equal((await f.create()).id,first.id);assert.equal((await f.create('different-key')).id,first.id);assert.equal(f.store.read().tasks.length,1);assert.equal(f.store.read().flowNotifications.length,3);assert.equal(f.store.read().flowNotifications.filter(n=>n.kind==='live_assignment').length,2);assert.equal(new FlowRuntime(f.store,{people:()=>staff}).get(access(),first.id).runtime.liveSession.key,first.runtime.liveSession.key);
