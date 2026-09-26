@@ -1,3 +1,4 @@
+import { createIntelligenceHandler } from './daily-intelligence-http.mjs';
 import {ProductionSources} from './flow-production-sources.mjs';
 import { createReadStream, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
@@ -3140,6 +3141,7 @@ const workflowAssistant = new WorkflowAssistant(workflowStore, { provider: confi
 const workflowHandler = createWorkflowHandler({ engine: workflowEngine, assistant: workflowAssistant, cloudReader: new WorkflowCloudReader(workflowEngine,callAuthority),
   currentSession, accessFor: taskCenterAccess, previewFor: permissionPreviewFor, readBody, readJson: readTaskJsonBody,
   sendJson, assignees: taskCenterAssignees, principals: JSON.parse(process.env.WORKFLOW_ADAPTERS_JSON || '[]'), writesEnabled: flowExecution.legacyWritesEnabled });
+const intelligenceHandler=createIntelligenceHandler({sessionFor:currentSession,sendJson});
 
 const server=createServer(shutdown.wrapHandler(async (request, response) => {
   const url = new URL(request.url || "/", "http://127.0.0.1");
@@ -3149,7 +3151,7 @@ const server=createServer(shutdown.wrapHandler(async (request, response) => {
     return;
   }
 
-  try { if (await handleApi(request, response, url)) return; }
+  try { if (await intelligenceHandler(request, response, url)) return; if (await handleApi(request, response, url)) return; }
   catch {
     if (!response.headersSent && !response.destroyed) sendJson(response,503,{detail:'请求暂未完成，请刷新核对；原有任务和素材不会因此删除'});
     else response.end();

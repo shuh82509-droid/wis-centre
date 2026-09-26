@@ -36,6 +36,7 @@ import { api, ApiError, isTransientApiError } from "./api";
 import { modules } from "./data";
 import { OrganizationDashboardPage } from "./OrganizationDashboard";
 import { FlowInboxSummary } from "./FlowInboxSummary";
+import { DailyIntelligence } from "./DailyIntelligence";
 import { LiveDailyWork } from "./LiveDailyWork";
 import { SparkLibrary } from "./SparkLibrary";
 import { sourceTime } from "./sourceTime";
@@ -718,6 +719,7 @@ function HubHome({ session, notify, onOpenModule }: { session: HubSession; notif
           <span><b>业务模块</b>{visibleModules.length} 个</span>
         </div>}
       </section>
+      <DailyIntelligence session={session} />
       <LiveDailyWork session={session} />
       <FlowInboxSummary session={session} onRouteOrder={setRouteOrder} />
       <WorkspacePublicSummary session={session} />
