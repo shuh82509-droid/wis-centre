@@ -3,6 +3,7 @@ import { createReadStream, existsSync, mkdirSync, readFileSync, renameSync, stat
 import { spawn } from "node:child_process";
 import {startSourceScheduler} from './source-scheduler.mjs';
 import { createServer } from "node:http";
+import { liveTaskNavigation } from "./live-task-navigation.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -3160,6 +3161,22 @@ const server=createServer(shutdown.wrapHandler(async (request, response) => {
     response.setHeader("Allow", "GET, HEAD");
     response.end("Method Not Allowed");
     return;
+  }
+
+  if (request.method === "GET" && isHtmlNavigation(request) && url.searchParams.has('task')
+      && ['/workflow-panorama', '/workflow-panorama/'].includes(url.pathname)) {
+    try {
+      const session = await currentSession(request);
+      const location = liveTaskNavigation(url, session,
+        taskId => flowRuntime.get(flowAccessFor(session.payload), taskId));
+      if (location) {
+        response.writeHead(303, { Location: location, 'Cache-Control': 'no-store' });
+        response.end();
+        return;
+      }
+    } catch {
+      // Leave the existing Panorama route unchanged if admission is unavailable.
+    }
   }
 
   let decodedPath;

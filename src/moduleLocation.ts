@@ -13,11 +13,17 @@ export function initialModule(hash: string): string | null {
   return params.getAll('module').length === 1 && /^[a-z0-9-]+$/.test(module) ? module : null;
 }
 
-export function linkedLiveTask(hash: string): string | null {
+export function linkedLiveTaskRoute(hash: string): {taskId:string;view:'action'|'record'} | null {
   const params = new URLSearchParams(hash.replace(/^#/, ''));
   const task = params.get('liveTask') || '';
+  const view = params.get('liveView') || 'action';
   return params.getAll('module').length === 1 && params.get('module') === 'live-room-management' &&
-    params.getAll('liveTask').length === 1 && /^task_[a-z0-9]+$/.test(task) ? task : null;
+    params.getAll('liveTask').length === 1 && /^task_[a-z0-9]+$/.test(task) &&
+    params.getAll('liveView').length <= 1 && (view === 'action' || view === 'record') ? {taskId:task,view} : null;
+}
+
+export function linkedLiveTask(hash: string): string | null {
+  return linkedLiveTaskRoute(hash)?.taskId || null;
 }
 
 export function workflowReturnTarget(hash: string, href: string): string | null {

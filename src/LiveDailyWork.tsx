@@ -1,17 +1,19 @@
-import {useEffect, useRef, useState} from 'react';
+import {useEffect, useRef, useState, useSyncExternalStore} from 'react';
 import type {HubSession} from './types';
 import './live-daily-work.css';
 import {LiveCalendarAuthorization} from './LiveCalendarAuthorization';
-import {linkedLiveTask} from './moduleLocation';
+import {linkedLiveTaskRoute} from './moduleLocation';
 
 type Slot={key:string;signature:string;date:string;roomName:string;startAt:string;endAt:string;anchor:string;assistants:string[];anchorName?:string;assistantNames?:string[];cohostDisplay?:string;roomLead?:{number:string;name:string};sourceIssue?:string;cancelledTasks?:{id:string;version:number;title:string;sessionKey:string;taskUrl:string}[]};
 type Item={taskId:string;version:number;title:string;state:string;taskUrl:string;session:Slot;waitingFor:string[];node:{id:string;title:string;state:string;liveStage:string;dueAt?:string;plannedDueAt:string;attempt:number}};
 type Issue={roomCode?:string;roomName?:string;date?:string;message:string};
 type Today={date:string;generatedAt:string;enabled:boolean;canManage:boolean;items:Item[];dispatch?:{checkedAt:string;state:string;issues:Issue[]};reconciliationTasks?:{id:string;version:number;title:string;state:string;issue:string;taskUrl:string}[]};
-type Run={id:string;version:number;title:string;runtime:{state:string;liveSession?:Slot;nodes:Array<Item['node']&{owner:{number:string};dependencies:string[]}>}};
+type RunNode=Item['node']&{owner:{number:string;name?:string};dependencies:string[];completedAt?:string;note?:string;history?:Array<{attempt:number;state:string;completedAt?:string;note?:string}>};
+type Run={id:string;version:number;title:string;runtime:{state:string;liveSession?:Slot;nodes:RunNode[]};flowEvents?:Array<{id:string;nodeId?:string|null;action:string;at:string;note?:string}>;notifications?:Array<{id:string;nodeId?:string|null;kind:string;recipient:string;state:string;messageId?:string|null;createdAt?:string;sentAt?:string;error?:string|null}>};
 type Submission={path:string;body:Record<string,unknown>;key:string;label:string;item?:Item};
 const when=(s:string)=>new Date(s).toLocaleString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:false});
-const recordUrl=(taskId:string)=>{const url=new URL('workflow-panorama/',window.location.href);url.searchParams.set('task',taskId);url.searchParams.set('view','record');return url.pathname+url.search;};
+const recordUrl=(taskId:string)=>{const url=new URL(window.location.href);url.hash=new URLSearchParams({module:'live-room-management',liveTask:taskId,liveView:'record'}).toString();return url.pathname+url.search+url.hash;};
+function subscribeHash(notify:()=>void){window.addEventListener('hashchange',notify);window.addEventListener('popstate',notify);return()=>{window.removeEventListener('hashchange',notify);window.removeEventListener('popstate',notify);};}
 async function request(path:string, options:RequestInit={}){
   const response=await fetch('api/flows/'+path,{cache:'no-store',signal:AbortSignal.timeout(20000),...options});
   const result=await response.json().catch(()=>({error:'响应格式异常，请读回原任务确认结果。'}));
@@ -19,11 +21,27 @@ async function request(path:string, options:RequestInit={}){
   return result;
 }
 export function LiveDailyWork({session,compact=false}:{session:HubSession;compact?:boolean}){
+  const hash=useSyncExternalStore(subscribeHash,()=>window.location.hash,()=> '');
   const enabled=session.access.allowed_modules.includes('workflow-engine')&&session.access.allowed_modules.includes('live-room-management')&&!session.access.policy_state?.startsWith('development-preview');
-  const linkedTask=linkedLiveTask(window.location.hash);
-  const scope=JSON.stringify([session.user.number,session.workspace.role,session.workspace.center,session.access.allowed_modules,session.access.policy_state,linkedTask]);
+  const route=linkedLiveTaskRoute(hash),linkedTask=route?.taskId||null;
+  const scope=JSON.stringify([session.user.number,session.workspace.role,session.workspace.center,session.access.allowed_modules,session.access.policy_state,linkedTask,route?.view]);
   if(!enabled)return null;
+  if(route?.view==='record')return <LiveTaskRecord key={scope} taskId={route.taskId} compact={compact}/>;
   return <LiveWork key={scope} compact={compact} calendarAdmin={!!(session.permissions?.super_admin||session.permissions?.manage_permissions)} ownerNumber={session.user.number||''} linkedTask={linkedTask}/>;
+}
+function LiveTaskRecord({taskId,compact}:{taskId:string;compact:boolean}){
+  const [task,setTask]=useState<Run|null>(null),[error,setError]=useState(''),[loading,setLoading]=useState(true);
+  useEffect(()=>{let active=true;setTask(null);setError('');setLoading(true);void request('runs/'+taskId).then((result:Run)=>{if(!active)return;if(!result.runtime?.liveSession){setError('此任务不是正式直播场次，无法在直播只读详情中展示。');return;}setTask(result);}).catch(e=>{if(active)setError(e instanceof Error?e.message:'任务不存在或无权查看');}).finally(()=>{if(active)setLoading(false);});return()=>{active=false;};},[taskId]);
+  const content=<><header><div><h2>直播原任务记录（只读）</h2><p>仅展示当前账号有权查看的正式场次，不在此处办理或修改节点。</p></div><a href="#module=live-room-management">返回今日工作</a></header>
+    {loading&&<p role="status">正在读取原任务…</p>}{error&&<p role="alert" className="live-work-alert">{error}</p>}
+    {task&&<><p><strong>{task.title}</strong> · {task.runtime.liveSession?.date} · {task.runtime.liveSession?.roomName} · 任务状态 {task.runtime.state} · 版本 {task.version}</p>
+      {task.runtime.liveSession?.sourceIssue&&<p className="live-work-alert">班表来源待核验：{task.runtime.liveSession.sourceIssue}</p>}
+      <h3>节点办理记录</h3><ol>{task.runtime.nodes.map(node=><li key={node.id}><strong>{node.liveStage||node.title} · {node.title}</strong> · {node.state} · 主责 {node.owner.name||node.owner.number} · 第 {node.attempt} 次尝试{node.completedAt&&<> · 完成于 {when(node.completedAt)}</>}{node.note&&<p>完成结论：{node.note}</p>}{!!node.history?.length&&<details><summary>历史尝试 {node.history.length} 条</summary><ul>{node.history.map((row,i)=><li key={i}>第 {row.attempt} 次 · {row.state}{row.completedAt&&` · ${when(row.completedAt)}`}{row.note&&` · ${row.note}`}</li>)}</ul></details>}</li>)}</ol>
+      <details><summary>任务事件 · {task.flowEvents?.length||0} 条</summary><ul>{task.flowEvents?.map(event=><li key={event.id}>{when(event.at)} · {event.nodeId||'任务'} · {event.action}{event.note&&` · ${event.note}`}</li>)}</ul></details>
+      <details><summary>飞书通知账本 · {task.notifications?.length||0} 条</summary><p>“已发送”仅代表接口记录，不代表本人已读或确认；状态不明时请勿重复发送。</p><ul>{task.notifications?.map(notice=><li key={notice.id}>{notice.nodeId||'任务'} · {notice.kind} · 收件人 {notice.recipient} · {notice.state}{notice.sentAt&&` · ${when(notice.sentAt)}`}{notice.messageId&&` · 消息编号 ${notice.messageId}`}{notice.error&&` · ${notice.error}`}</li>)}</ul></details>
+    </>}
+  </>;
+  return <section className={'live-daily-work'+(compact?' live-daily-compact':'')} aria-label="直播原任务只读记录">{content}</section>;
 }
 function LiveWork({compact,calendarAdmin,ownerNumber,linkedTask}:{compact:boolean;calendarAdmin:boolean;ownerNumber:string;linkedTask:string|null}){
   const [data,setData]=useState<Today|null>(null),[error,setError]=useState(''),[message,setMessage]=useState(''),[busy,setBusy]=useState(false);
@@ -60,7 +78,7 @@ function LiveWork({compact,calendarAdmin,ownerNumber,linkedTask}:{compact:boolea
     {error&&<p role="alert" className="live-work-alert">{error}</p>}{message&&<p role="status">{message}</p>}
     {calendarAdmin&&<LiveCalendarAuthorization/>}
     {data?.dispatch&&data.canManage&&<details><summary>自动派工检查 · {when(data.dispatch.checkedAt)} · {data.dispatch.state==='ready'?'来源核验通过':'有待处理项'}</summary><ul>{data.dispatch.issues.map((x,i)=><li key={i}>{x.date} {x.roomName||x.roomCode}：{x.message}</li>)}</ul></details>}
-    {data?.canManage&&!!data.reconciliationTasks?.length&&<details open><summary>待核验的班表变更（主管处理）</summary><p>若原表已恢复为原人员与时间，可重新核验。若确实换人或改时间，请在原任务记录原因并终止，再在班表预览中明确选择替代任务；原交付记录不会删除或冒充新任务完成。</p>{data.reconciliationTasks.map(t=><form key={t.id+':'+t.version} onSubmit={e=>{e.preventDefault();const f=new FormData(e.currentTarget);void submit({path:'live/restore-source',key:crypto.randomUUID(),body:{taskId:t.id,expectedVersion:t.version,note:f.get('note')},label:'班表重新核验'});}}><p><strong>{t.title}</strong>：{t.issue} <a href={recordUrl(t.id)}>查看及处理原任务</a></p><label>核验说明<input name="note" required minLength={4} maxLength={500}/></label> <button disabled={busy||!!uncertain}>核验原班表并解除阻断</button></form>)}</details>}
+    {data?.canManage&&!!data.reconciliationTasks?.length&&<details open><summary>待核验的班表变更（主管处理）</summary><p>若原表已恢复为原人员与时间，可重新核验。若确实换人或改时间，请先查看原任务记录，再按现有主管流程处理终止与替代；原交付记录不会删除或冒充新任务完成。</p>{data.reconciliationTasks.map(t=><form key={t.id+':'+t.version} onSubmit={e=>{e.preventDefault();const f=new FormData(e.currentTarget);void submit({path:'live/restore-source',key:crypto.randomUUID(),body:{taskId:t.id,expectedVersion:t.version,note:f.get('note')},label:'班表重新核验'});}}><p><strong>{t.title}</strong>：{t.issue} <a href={recordUrl(t.id)}>查看原任务只读记录</a></p><label>核验说明<input name="note" required minLength={4} maxLength={500}/></label> <button disabled={busy||!!uncertain}>核验原班表并解除阻断</button></form>)}</details>}
     {uncertain&&<div className="live-work-alert"><button disabled={busy} onClick={()=>void readBack()}>读回原任务</button> <button disabled={busy} onClick={()=>void submit(uncertain)}>继续同一次提交</button><p>未确认结果前，请勿关闭本页或另建同一任务。</p></div>}
     {!data&&!error&&<p role="status">正在读取本人真实待办…</p>}
     {data&&<><p className="live-work-meta">{data.date} · 最近读取 {when(data.generatedAt)}{!data.enabled?' · 新场次派工待启用；未启用不代表当天无工作。':''}</p>
@@ -78,7 +96,7 @@ function LiveWork({compact,calendarAdmin,ownerNumber,linkedTask}:{compact:boolea
 function DispatchSlot({slot,disabled,submit}:{slot:Slot;disabled:boolean;submit:(body:Record<string,unknown>)=>void}){
   const [replacement,setReplacement]=useState('');
   return <article><form onSubmit={e=>{e.preventDefault();const f=new FormData(e.currentTarget),previous=slot.cancelledTasks?.find(t=>t.id===replacement);if(!window.confirm(`${previous?'保留已终止的原任务，并重新派发':'创建'} ${slot.roomName} ${when(slot.startAt)} 的工作，先通知 ${slot.roomLead?.name||'待核验'}，执行节点再通知主播与助理，确认？`))return;submit({date:slot.date,sessionKey:slot.key,signature:slot.signature,...(previous?{replacesTaskId:previous.id,expectedVersion:previous.version,note:f.get('note')}:{})});}}><strong>{slot.roomName} · {when(slot.startAt)} — {when(slot.endAt)}</strong><p>主负责人 {slot.roomLead?.name||'待核验'}；主播 {slot.anchorName||slot.anchor}{slot.cohostDisplay?`（共播：${slot.cohostDisplay}，不自动派工）`:''}；助理 {(slot.assistantNames||slot.assistants).join('、')}</p>
-    {!!slot.cancelledTasks?.length&&<><label>是否替代本直播间已终止的任务<select disabled={disabled} value={replacement} onChange={e=>setReplacement(e.target.value)}><option value="">不替代原任务</option>{slot.cancelledTasks.map(t=><option key={t.id} value={t.id}>{t.title} · {t.id.slice(-8)}</option>)}</select></label>{replacement&&<><a href={slot.cancelledTasks.find(t=>t.id===replacement)?.taskUrl}>核对已终止的原任务</a><label>重新派工原因<input name="note" required minLength={4} maxLength={500}/></label></>}</>}
+    {!!slot.cancelledTasks?.length&&<><label>是否替代本直播间已终止的任务<select disabled={disabled} value={replacement} onChange={e=>setReplacement(e.target.value)}><option value="">不替代原任务</option>{slot.cancelledTasks.map(t=><option key={t.id} value={t.id}>{t.title} · {t.id.slice(-8)}</option>)}</select></label>{replacement&&<><a href={recordUrl(replacement)}>核对已终止原任务的只读记录</a><label>重新派工原因<input name="note" required minLength={4} maxLength={500}/></label></>}</>}
     <button disabled={disabled}>{replacement?'保留原记录并重新派工':'确认此场次并派工'}</button></form></article>;
 }
 function CompletionForm({item,disabled,close,submit}:{item:Item;disabled:boolean;close:()=>void;submit:(b:Record<string,unknown>)=>void}){
