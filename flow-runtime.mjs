@@ -164,7 +164,20 @@ export class FlowRuntime{
      requireFact(affected.has(n.id),'目标不是本节点的上游',409);for(const row of t.runtime.nodes.filter(x=>affected.has(x.id))){row.history.push({attempt:row.attempt,state:row.state,evidence:row.evidence,startedAt:row.startedAt,completedAt:row.completedAt,note:row.note,...(row.liveFacts?{liveFacts:row.liveFacts}:{})});delete row.liveFacts;row.attempt++;row.state='pending';row.evidence=[];delete row.completedAt;delete row.completedBy;delete row.startedAt;delete row.dueAt;delete row.durationSeconds;delete row.activeDurationSeconds;delete row.pausedMs;delete row.warnedAt;delete row.escalatedAt;delete row.note;}
      t.runtime.sourceContext=Object.assign({},t.runtime.inheritedContext||{},...t.runtime.nodes.filter(x=>x.state==='completed').flatMap(x=>x.evidence.map(e=>e.context||{})));
      const e=this.log(s,t,n,'node_returned',a.user,b.note);this.notify(s,t,target,'returned',target.owner.number,e.id);this.route(s,t);
-    }else if(action==='assign'){requireFact(manage,'需要流程管理权限',403);requireFact(n.state!=='completed','已完成节点不可改主责',409);if(t.runtime.liveSession)requireFact(n.owner.number!==b.owner,'新主责与当前相同，不能重复改派或发通知',409);this.validateOwner(n,b.owner,t.runtime.nodes);n.owner=this.person(b.owner,a);requireFact(this.canNotify(n.owner.number),'新主责的飞书尚未绑定，请先完成绑定',409);t.runtime.participants=[...new Set([...t.runtime.participants,n.owner.number])];const e=this.log(s,t,n,'node_assigned',a.user,b.note);if(n.state==='ready')this.notify(s,t,n,'ready',n.owner.number,e.id);
+    }else if(action==='assign'){requireFact(manage,'需要流程管理权限',403);requireFact(n.state!=='completed','已完成节点不可改主责',409);if(t.runtime.liveSession){requireFact(n.owner.number!==b.owner,'新主责与当前相同，不能重复改派或发通知',409);
+      // Live execution nodes are bound to exact positions in the verified
+      // slot, not merely to a set of people. Generic reassignment cannot
+      // update the assistant's shift, next-day manifest, or original Feishu
+      // card. Correct the formal schedule, cancel, and rebuild this task.
+      if(n.id.startsWith('W04.S4.')){
+       const slot=t.runtime.liveSession,assistantMatch=n.id.match(/^W04\.S4\.A([1-9]\d*)$/);
+       requireFact(n.id==='W04.S4.E1'||assistantMatch,'直播执行节点岗位未定义，禁止通过通用改派',409);
+       const assistantIndex=assistantMatch?Number(assistantMatch[1])-1:-1;
+       const original=n.id==='W04.S4.E1'?slot.anchor:Array.isArray(slot.assistants)?slot.assistants.filter(number=>number!==slot.anchor)[assistantIndex]:undefined;
+       requireFact(typeof original==='string'&&n.owner.number===original,'执行节点与原正式班表岗位不一致，请暂停并核对原场次',409);
+       requireFact(false,'直播执行节点不得通过通用改派；请先修正正式班表、终止原任务并重新派工，以重建时段与本人飞书卡片',409);
+      }
+     }this.validateOwner(n,b.owner,t.runtime.nodes);n.owner=this.person(b.owner,a);requireFact(this.canNotify(n.owner.number),'新主责的飞书尚未绑定，请先完成绑定',409);t.runtime.participants=[...new Set([...t.runtime.participants,n.owner.number])];const e=this.log(s,t,n,'node_assigned',a.user,b.note);if(n.state==='ready')this.notify(s,t,n,'ready',n.owner.number,e.id);
     }else if(action==='extend'){requireFact(manage&&n.state==='ready','只有流程管理人可调整当前节点时限',403);requireFact(text(b.note)&&Number.isFinite(Date.parse(b.dueAt))&&Date.parse(b.dueAt)>this.clock(),'请填写延期原因与有效未来时间');n.dueAt=new Date(b.dueAt).toISOString();delete n.warnedAt;delete n.escalatedAt;this.log(s,t,n,'deadline_extended',a.user,b.note);
     }else requireFact(false,'未知流程操作',404);
    }

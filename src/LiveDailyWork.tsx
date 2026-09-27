@@ -69,7 +69,7 @@ function completedUpstream(task:Run,node:RunNode){
 }
 function SupervisorCorrection({task,busy,submit}:{task:Run;busy:boolean;submit:(correction:Correction)=>Promise<void>}){
   const running=task.runtime.state==='running',paused=task.runtime.state==='paused',sourceIssue=!!task.runtime.liveSession?.sourceIssue;
-  const assignable=task.runtime.nodes.filter(node=>node.state==='ready'||node.state==='pending');
+  const assignable=task.runtime.nodes.filter(node=>(node.state==='ready'||node.state==='pending')&&!node.id.startsWith('W04.S4.'));
   const returnable=task.runtime.nodes.filter(node=>node.state==='ready'&&completedUpstream(task,node).length);
   const actions:CorrectionAction[]=running?['pause',...(!sourceIssue&&assignable.length?['assign' as const]:[]),...(!sourceIssue&&returnable.length?['return' as const]:[]),'cancel']:paused?[...(!sourceIssue?['resume' as const]:[]),'cancel']:[];
   const [action,setAction]=useState<CorrectionAction>(actions[0]||'pause'),[nodeId,setNodeId]=useState('');
@@ -77,6 +77,7 @@ function SupervisorCorrection({task,busy,submit}:{task:Run;busy:boolean;submit:(
   if(task.workflow!=='04'||!task.runtime.liveSession||!actions.length)return null;
   return <details className="live-supervisor-correction"><summary>主管纠错（仅正式场次）</summary>
     <p>只处理原任务异常，不代替主播、助理或负责人完成节点；所有操作保留原版本、原因及通知账本。班表变更时先核验来源，不能直接恢复或改派。</p>
+    <p>直播执行环节的主播、助理不能在原任务直接改派。人员变更须先更正正式班表，再终止旧场次任务；核验新班次后选择“保留原记录并重新派工”。若新班次尚未通过来源和身份核验，请勿派工。</p>
     {sourceIssue&&<p className="live-work-alert">当前班表来源待核验；仅可暂停或终止原任务。若班次已变更，请终止后按正式班表明确创建替代任务。</p>}
     <form key={task.id+':'+task.version+':'+action} aria-label="主管纠错" onSubmit={event=>{event.preventDefault();const form=new FormData(event.currentTarget),reason=String(form.get('note')||'').trim(),body:Record<string,unknown>={expectedVersion:task.version,note:reason};if(action==='assign'){body.nodeId=selected?.id;body.owner=String(form.get('owner')||'').trim();}if(action==='return'){body.nodeId=selected?.id;body.targetNodeId=String(form.get('targetNodeId')||'');}if(!actions.includes(action)||reason.length<4||action==='assign'&&(!selected||!body.owner)||action==='return'&&(!selected||!upstream.some(row=>row.id===body.targetNodeId)))return;
       const names:{[K in CorrectionAction]:string}={pause:'暂停',resume:'恢复',assign:'改派',return:'退回',cancel:'终止'};

@@ -123,6 +123,46 @@ test('直播管理员仍可暂停、恢复、显式改派和退回，改派后�
  assert.equal(task.runtime.nodes.find(n=>n.id===first.id).state,'ready');
  assert.equal(task.runtime.nodes.find(n=>n.id===first.id).history.length,1);
 });
+test('W04 执行节点待执行或已到达均不得通用改派，原岗位、班次及飞书通知账本保持不变',async t=>{
+ const f=fixture(t);
+ f.live.readSchedule=async()=>{const raw=f.raw();raw.rooms[0].assistants=[['08:30','10:30','助理'],['10:30','12:00','无关同事']];return raw;};
+ f.runtime.liveParticipants={canOwn:(number,nodeId)=>['A','B','X'].includes(number)&&/^W04\.S4\.(E1|A\d+)$/.test(nodeId)};
+ let task=await f.create();
+ assert.equal(task.runtime.liveSession.anchor,'A');
+ assert.deepEqual(task.runtime.liveSession.assistants,['B','X']);
+ assert.equal(task.runtime.nodes.find(n=>n.id==='W04.S4.A1').owner.number,'B');
+ assert.equal(task.runtime.nodes.find(n=>n.id==='W04.S4.A2').owner.number,'X');
+ const reject=(nodeId,owner,key,reason)=>{
+  const before=JSON.stringify(f.store.read());
+  assert.throws(()=>f.runtime.command(access(),task.id,'assign',{expectedVersion:task.version,nodeId,owner,note:'核对原班表后纠错'},key),error=>error.status===409&&reason.test(error.message));
+  assert.equal(JSON.stringify(f.store.read()),before);
+ };
+ const blocked=[['W04.S4.E1','B'],['W04.S4.E1','M'],['W04.S4.A1','A'],['W04.S4.A1','M'],['W04.S4.A1','X'],['W04.S4.A2','B']];
+ for(const [nodeId,owner] of blocked)reject(nodeId,owner,`pending-${nodeId}-${owner}`,/不得通过通用改派/);
+ f.setNow('2026-09-23T12:10:00+08:00');
+ for(let i=0;i<4;i++){
+  const node=task.runtime.nodes.find(n=>n.state==='ready');
+  task=complete(f,task,node.id==='W04.S3.E2'?{confirmed:true,people:true,equipment:true,goods:true,risks:true}:{confirmed:true});
+ }
+ assert.deepEqual(task.runtime.nodes.filter(n=>n.state==='ready').map(n=>n.id),['W04.S4.E1','W04.S4.A1','W04.S4.A2']);
+ for(const [nodeId,owner] of blocked)reject(nodeId,owner,`ready-${nodeId}-${owner}`,/不得通过通用改派/);
+});
+test('W04 执行节点历史岗位漂移不可通用改派修复，须暂停并核对原场次',async t=>{
+ const f=fixture(t);let task=await f.create();
+ f.store.transaction(s=>{const row=s.tasks.find(x=>x.id===task.id);row.runtime.nodes.find(n=>n.id==='W04.S4.E1').owner={number:'X',name:'无关同事',center:'直播中心'};row.version++;return true;});
+ task=f.runtime.get(access(),task.id);
+ const body={expectedVersion:task.version,nodeId:'W04.S4.E1',owner:'A',note:'恢复原班表主播'};
+ const before=JSON.stringify(f.store.read());
+ assert.throws(()=>f.runtime.command(access(),task.id,'assign',body,'restore-anchor-unsafe'),error=>error.status===409&&/原正式班表岗位不一致/.test(error.message));
+ assert.equal(JSON.stringify(f.store.read()),before);
+});
+test('未来新增的 W04.S4 执行节点若无明确岗位规则，通用改派默认拒绝且不写账本',async t=>{
+ const f=fixture(t),created=await f.create();
+ f.store.transaction(s=>{const task=s.tasks.find(row=>row.id===created.id),existing=task.runtime.nodes.find(n=>n.id==='W04.S4.A1');task.runtime.nodes.push({...structuredClone(existing),id:'W04.S4.F1'});task.version++;return true;});
+ const task=f.runtime.get(access(),created.id),before=JSON.stringify(f.store.read());
+ assert.throws(()=>f.runtime.command(access(),task.id,'assign',{expectedVersion:task.version,nodeId:'W04.S4.F1',owner:'X',note:'未来岗位不得绕过原班表规则'},'future-stage4-assign'),error=>error.status===409&&/岗位未定义/.test(error.message));
+ assert.equal(JSON.stringify(f.store.read()),before);
+});
 test('正式场次来源待核验时服务端只允许暂停或取消，不准恢复、改派、退回或延期',async t=>{
  const f=fixture(t),created=await f.create();
  f.store.transaction(s=>{const task=s.tasks.find(row=>row.id===created.id);task.runtime.liveSession.sourceIssue='班表来源变化';task.version++;return true;});

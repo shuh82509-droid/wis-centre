@@ -37,6 +37,19 @@ test('来源待核验时，仅开放暂停与终止；暂停后不能直接恢�
  const paused=await record({task:run('paused','正式班表人员变化')});const pausedForm=paused.renderCorrection('cancel');const pausedChoices=find(pausedForm,n=>n.type==='select'&&n.props.value==='cancel');assert.deepEqual(Array.from(pausedChoices.props.children,n=>n.props.value),['cancel']);
 });
 
+test('直播执行节点不能在原任务改派，主管须按正式班表终止后重派',async()=>{
+ const execution={id:'W04.S4.E1',title:'主播直播执行',liveStage:'直播执行',owner:{number:'A',name:'主播'},state:'ready',attempt:1,dependencies:['W04.S2.E1']};
+ const assistant={...execution,id:'W04.S4.A1',title:'助理直播执行',owner:{number:'B',name:'助理'}};
+ const mixed=await record({task:{...run(),runtime:{...run().runtime,nodes:[...nodes,execution,assistant]}}});
+ const tree=mixed.renderCorrection('assign');
+ const nodeChoices=find(tree,n=>n.type==='select'&&n.props.value==='W04.S2.E1');
+ assert.deepEqual(Array.from(nodeChoices.props.children,n=>n.props.value),['W04.S2.E1']);
+ assert.match(JSON.stringify(tree),/先更正正式班表.*终止旧场次任务.*保留原记录并重新派工/);
+ const onlyExecution=await record({task:{...run(),runtime:{...run().runtime,nodes:[execution,assistant]}}});
+ const actions=find(onlyExecution.renderCorrection(),n=>n.type==='select'&&n.props.value==='pause');
+ assert.deepEqual(Array.from(actions.props.children,n=>n.props.value),['pause','cancel']);
+});
+
 test('主管五类纠错均带原版本与幂等键，改派和退回只选未完成节点及真实上游',async()=>{
  for(const [state,action,fields,expected] of [
   ['running','pause',{note:'等待资料核验'},{}],
