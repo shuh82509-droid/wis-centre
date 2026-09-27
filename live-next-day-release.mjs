@@ -25,7 +25,7 @@ const signedFields=permit=>({version:permit.version,businessDate:permit.business
   bootId:permit.bootId,scopeHash:permit.scopeHash,sourceHash:permit.sourceHash,
   sourceRevision:permit.sourceRevision,roomCodes:permit.roomCodes,groupChatId:permit.groupChatId,
   issuedAt:permit.issuedAt,expiresAt:permit.expiresAt,evidenceHash:permit.evidenceHash,
-  activationNonce:permit.activationNonce});
+  readinessPolicyHash:permit.readinessPolicyHash,activationNonce:permit.activationNonce});
 const signingBytes=permit=>Buffer.from(SIGNING_CONTEXT+JSON.stringify(signedFields(permit)));
 const signingPrivateKey=value=>{
   try{const key=value?.type==='private'?value:createPrivateKey(value);return key.asymmetricKeyType==='ed25519'?key:null;}catch{return null;}
@@ -103,9 +103,9 @@ export function nextDayReleaseManifest({raw,snapshot,people,participants,recipie
 
 // Recompute the complete, current-version read-only gate at the signing point.
 // A caller's checksPassed flag or a list of message IDs is never sufficient.
-function requireCompleteReleasePreflight(manifest,evidence,now,mode){
-  const policy=evidence?.readiness?.policy,readback=evidence?.readiness?.evidence;
-  requireFact(policy&&readback,'缺少完整独立预检证据，禁止签发次日许可',409);
+function requireCompleteReleasePreflight(manifest,evidence,now,mode,policy){
+  const readback=evidence?.readiness?.evidence;
+  requireFact(readback,'缺少完整独立预检证据，禁止签发次日许可',409);
   const result=evaluateNextDayEvidence(readback,{now,mode,policy});
   requireFact(result.checksPassed&&result.date===manifest.businessDate&&
     result.sourceRevision===manifest.sourceRevision&&
@@ -121,6 +121,7 @@ function requireCompleteReleasePreflight(manifest,evidence,now,mode){
   const tasks=new Map(readback.state.tasks.map(task=>[task.id,task]));
   const cards=new Map(readback.state.notifications.map(card=>[card.id,card]));
   const messages=new Map(readback.cardReadbacks.map(row=>[row.messageId,row]));
+  const legacyMessages=new Map(evidence.cardMessages.map(row=>[row.cardNoticeId,row]));
   const people=new Map(readback.bindings.map(person=>[person.number,person]));
   const slots=new Map(source.slots.map(slot=>[slot.key,slot]));
   const seen=new Set();
@@ -139,19 +140,55 @@ function requireCompleteReleasePreflight(manifest,evidence,now,mode){
       people.get(ref.number)?.openId===ref.recipientId&&ref.recipientType==='open_id'&&
       message?.independentMessageId===ref.cardMessageId,
     '预检任务、本人、卡片消息 ID 与许可清单不一致',409);
+    const legacy=legacyMessages.get(ref.cardNoticeId),proof=message.recipientProof;
+    // Keep the older adapter shape, but accept only one canonical independent
+    // readback. A message ID cannot join different chats or peer proofs.
+    const canonical={cardNoticeId:ref.cardNoticeId,cardMessageId:message.messageId,
+      recipientId:proof.openId,recipientType:'open_id',chatId:message.chatId,
+      messageReadback:{messageId:message.independentMessageId,chatId:message.chatId,
+        senderAppId:message.senderAppId,msgType:message.msgType,deleted:message.deleted,
+        checkedAt:message.checkedAt},recipientReadback:proof};
+    const proofFields=row=>({cardNoticeId:row.cardNoticeId,cardMessageId:row.cardMessageId,
+      recipientId:row.recipientId,recipientType:row.recipientType,chatId:row.chatId,
+      messageReadback:{messageId:row.messageReadback.messageId,chatId:row.messageReadback.chatId,
+        senderAppId:row.messageReadback.senderAppId,msgType:row.messageReadback.msgType,
+        deleted:row.messageReadback.deleted,checkedAt:row.messageReadback.checkedAt},
+      recipientReadback:{kind:row.recipientReadback.kind,chatId:row.recipientReadback.chatId,
+        openId:row.recipientReadback.openId,checkedAs:row.recipientReadback.checkedAs,
+        complete:row.recipientReadback.complete,memberIds:row.recipientReadback.memberIds,
+        messageId:row.recipientReadback.messageId,readUserIds:row.recipientReadback.readUserIds,
+        checkedAt:row.recipientReadback.checkedAt}});
+    requireFact(same(proofFields(legacy),proofFields(canonical)),
+      '两套派工卡读回的消息、会话、本人或证明不一致，禁止放行',409);
     seen.add(key);
   }
 }
 
-// The deployment operator supplies the independent message-ID readback. This
-// function only writes a separate release file; it NEVER edits task-center.json.
+// The trusted deployment operator supplies the independent message-ID readback.
+// readinessPolicy and its pinned digest MUST come from separate read-only,
+// operator-approved configuration, never from collected evidence. The digest
+// binds that trusted boundary; this function cannot establish group approval.
+// There is deliberately no evidence/env/default policy fallback. A live adapter
+// must preserve this boundary before it may invoke the signer.
+// It only writes a separate release file; it NEVER edits task-center.json.
 // No HTTP route, environment-only switch or automatic timer can call it.
-export function installNextDayReleasePermit(file,{manifest,evidence,privateKey,clock=Date.now,
+export function installNextDayReleasePermit(file,{manifest,evidence,readinessPolicy,
+  externallyPinnedPolicyHash,privateKey,clock=Date.now,
   ttlMs=MAX_PERMIT_MS,notAfterMs=Infinity}){
   const now=clock(),date=dateAt(now+86400000);
   const {scopeHash,preparedAt,...claim}=manifest||{};
   const signer=signingPrivateKey(privateKey);
   requireFact(signer,'缺少独立 Ed25519 发布私钥，禁止签发次日许可',409);
+  requireFact(readinessPolicy&&typeof readinessPolicy==='object'&&!Array.isArray(readinessPolicy)&&
+    /^[a-f0-9]{64}$/u.test(externallyPinnedPolicyHash||'')&&
+    sha(readinessPolicy)===externallyPinnedPolicyHash&&
+    !Object.hasOwn(evidence||{},'policy')&&
+    !Object.hasOwn(evidence?.readiness||{},'policy'),
+  '缺少独立固定预检策略、摘要不匹配或证据自带策略，禁止签发',409);
+  // Snapshot the approved input so later caller callbacks cannot mutate it.
+  const pinnedPolicy=structuredClone(readinessPolicy);
+  requireFact(sha(pinnedPolicy)===externallyPinnedPolicyHash,
+    '独立固定预检策略快照摘要不匹配，禁止签发',409);
   requireFact(manifest?.version===PERMIT_VERSION&&manifest.businessDate===date&&manifest.groupChatId===WAR_ROOM&&
     validIdentity(manifest.releaseId)&&validIdentity(manifest.bootId)&&
     scopeHash===sha(claim)&&/^[a-f0-9]{64}$/u.test(manifest.sourceHash||'')&&
@@ -206,8 +243,9 @@ export function installNextDayReleasePermit(file,{manifest,evidence,privateKey,c
   const permit={version:PERMIT_VERSION,businessDate:date,releaseId:manifest.releaseId,bootId:manifest.bootId,
     scopeHash:manifest.scopeHash,sourceHash:manifest.sourceHash,
     sourceRevision:manifest.sourceRevision,roomCodes:manifest.roomCodes,groupChatId:WAR_ROOM,
-    issuedAt:new Date(now).toISOString(),expiresAt:new Date(expiresAt).toISOString(),evidenceHash:sha(evidence),
-    activationNonce:randomUUID()};
+    issuedAt:new Date(now).toISOString(),expiresAt:new Date(expiresAt).toISOString(),
+    readinessPolicyHash:externallyPinnedPolicyHash,
+    evidenceHash:sha({evidence,readinessPolicyHash:externallyPinnedPolicyHash}),activationNonce:randomUUID()};
   permit.signature=sign(null,signingBytes(permit),signer).toString('base64url');
   // The signed permit contains no secret; the private signing key must stay
   // outside this directory. The Hub runs under a different UID and sees only
@@ -232,7 +270,7 @@ export function installNextDayReleasePermit(file,{manifest,evidence,privateKey,c
     requireFact(!existing||Date.parse(existing.issuedAt)<now,
       '新的放行许可必须晚于上一份，禁止重用同一签发时刻',409);
     requireCompleteReleasePreflight(manifest,evidence,now,
-      existing&&Date.parse(existing.expiresAt)>now?'renewal':'activation');
+      existing&&Date.parse(existing.expiresAt)>now?'renewal':'activation',pinnedPolicy);
     temp=file+'.'+process.pid+'.'+randomUUID()+'.tmp';
     const fd=openSync(temp,'wx',0o600);
     try{
@@ -240,8 +278,15 @@ export function installNextDayReleasePermit(file,{manifest,evidence,privateKey,c
       if(process.platform!=='win32')fchmodSync(fd,0o644);
       fsyncSync(fd);
     }finally{closeSync(fd);}
-    // This is the atomic activation commit point. A slow lock/fsync or host
-    // pause must not slip the first permit past 15:55 or reuse stale evidence.
+    // Do every fallible durability operation before activation. Once rename
+    // succeeds the running Hub may observe the permit immediately, so a
+    // post-rename fsync failure must never report "not activated" to the
+    // release operator or invite a retry.
+    if(process.platform!=='win32'){
+      const dirFd=openSync(dirname(file),'r');try{fsyncSync(dirFd);}finally{closeSync(dirFd);}
+    }
+    // After every potentially slow fsync, recheck the entire signed snapshot
+    // immediately before rename, not just its outer collection timestamp.
     const committedAt=clock(),firstActivation=!existing||Date.parse(existing.expiresAt)<=now;
     requireFact(Number.isFinite(committedAt)&&committedAt>=now&&committedAt<notAfterMs&&
       committedAt<expiresAt&&committedAt<closesAt&&
@@ -250,13 +295,11 @@ export function installNextDayReleasePermit(file,{manifest,evidence,privateKey,c
       (!firstActivation||committedAt<firstActivationDeadline)&&
       (firstActivation||committedAt<Date.parse(existing.expiresAt)),
     '放行原子提交时已超出批准时窗或证据已过期，许可保持关闭',409);
-    // Do every fallible durability operation before activation. Once rename
-    // succeeds the running Hub may observe the permit immediately, so a
-    // post-rename fsync failure must never report "not activated" to the
-    // release operator or invite a retry.
-    if(process.platform!=='win32'){
-      const dirFd=openSync(dirname(file),'r');try{fsyncSync(dirFd);}finally{closeSync(dirFd);}
-    }
+    requireFact(sha(pinnedPolicy)===permit.readinessPolicyHash&&
+      sha({evidence,readinessPolicyHash:permit.readinessPolicyHash})===permit.evidenceHash,
+    '放行原子提交时签名证据或固定策略摘要已变化，许可保持关闭',409);
+    requireCompleteReleasePreflight(manifest,evidence,committedAt,
+      firstActivation?'activation':'renewal',pinnedPolicy);
     renameSync(temp,file);temp=null;committed=true;
     return permit;
   }finally{
@@ -286,6 +329,7 @@ export function readNextDayReleasePermit(file,{publicKey}={}){
       /^20\d{2}-\d{2}-\d{2}$/u.test(value.businessDate||'')&&
       /^[a-f0-9]{64}$/u.test(value.scopeHash||'')&&/^[a-f0-9]{64}$/u.test(value.sourceHash||'')&&
       /^[a-f0-9]{64}$/u.test(value.evidenceHash||'')&&validNonce(value.activationNonce)&&
+      /^[a-f0-9]{64}$/u.test(value.readinessPolicyHash||'')&&
       typeof value.signature==='string'&&/^[A-Za-z0-9_-]{86}$/u.test(value.signature)&&
       Number.isSafeInteger(value.sourceRevision)&&value.sourceRevision>0&&
       Array.isArray(value.roomCodes)&&value.roomCodes.length===ROOM_CODES.size&&

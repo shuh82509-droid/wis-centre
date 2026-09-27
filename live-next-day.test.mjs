@@ -93,11 +93,11 @@ const releaseReadiness=(f,checkedAt)=>{
     {number:'B',name:'助理乙',openId:'ou_assistant'}];
   const byNumber=new Map(bindings.map(x=>[x.number,x]));
   const cardReadbacks=notifications.map(n=>({messageId:n.messageId,
-    independentMessageId:n.messageId,chatId:'oc_test'+n.id,
+    independentMessageId:n.messageId,chatId:'oc_test'+n.id.replaceAll('-',''),
     senderAppId:appId,msgType:'interactive',deleted:false,immutableCardMatched:true,
-    checkedAt:iso,personalChat:{chatId:'oc_test'+n.id,mode:'p2p',status:'normal',
+    checkedAt:iso,personalChat:{chatId:'oc_test'+n.id.replaceAll('-',''),mode:'p2p',status:'normal',
       checkedAs:'bot',checkedAt:iso},recipientProof:{kind:'p2p_member',
-      chatId:'oc_test'+n.id,openId:byNumber.get(n.recipient).openId,
+      chatId:'oc_test'+n.id.replaceAll('-',''),openId:byNumber.get(n.recipient).openId,
       checkedAs:'bot',checkedAt:iso,complete:true,
       memberIds:[byNumber.get(n.recipient).openId]}}));
   return {policy,evidence:{collectorIssues:[],environment:{gateway:{
@@ -117,20 +117,30 @@ const releaseReadiness=(f,checkedAt)=>{
     groupTest:{messageId:'om_group_test',chatId:groupId,senderAppId:appId,
       deleted:false,exactTestMarker:true,approvalVerifiedExternally:true,checkedAt:iso}}};
 };
-const releaseEvidence=(f,checkedAt)=>({operator:'FD-026222',scopeHash:f.manifest.scopeHash,
+// Synthetic pinned test configuration is supplied separately from readbacks.
+// It is not a real operator approval or a production collection adapter.
+const releasePolicyOptions=f=>{
+  const readinessPolicy=releaseReadiness(f,firstActivationAt).policy;
+  return {readinessPolicy,externallyPinnedPolicyHash:sha(readinessPolicy)};
+};
+const releaseEvidence=(f,checkedAt)=>{
+  const readiness=releaseReadiness(f,checkedAt).evidence;
+  const byId=new Map(readiness.cardReadbacks.map(row=>[row.messageId,row]));
+  return {operator:'FD-026222',scopeHash:f.manifest.scopeHash,
   sourceRevision:f.manifest.sourceRevision,gatewayReleaseId:f.manifest.releaseId,
   gatewayBootId:f.manifest.bootId,gatewayVerified:true,groupChatId:f.manifest.groupChatId,
   checkedAt:new Date(checkedAt).toISOString(),botAppId:'cli_testbot1234',
-  readiness:releaseReadiness(f,checkedAt),
-  cardMessages:f.manifest.refs.map((r,index)=>({cardNoticeId:r.cardNoticeId,
+  readiness:{evidence:readiness},
+  cardMessages:f.manifest.refs.map(r=>{
+    const row=byId.get(r.cardMessageId);
+    return {cardNoticeId:r.cardNoticeId,
     cardMessageId:r.cardMessageId,recipientId:r.recipientId,recipientType:r.recipientType,
-    chatId:`oc_testcard${index}chat`,messageReadback:{messageId:r.cardMessageId,
-      chatId:`oc_testcard${index}chat`,senderAppId:'cli_testbot1234',
-      msgType:'interactive',deleted:false,
-      checkedAt:new Date(checkedAt).toISOString()},recipientReadback:{kind:'p2p_member',
-      openId:r.recipientId,chatId:`oc_testcard${index}chat`,checkedAs:'bot',
-      complete:true,memberIds:[r.recipientId],
-      checkedAt:new Date(checkedAt).toISOString()}}))});
+    chatId:row.chatId,messageReadback:{messageId:row.independentMessageId,
+      chatId:row.chatId,senderAppId:row.senderAppId,msgType:row.msgType,
+      deleted:row.deleted,checkedAt:row.checkedAt},
+    recipientReadback:structuredClone(row.recipientProof)};
+  })};
+};
 
 test('fresh official source evidence records current revision separately from task creation revision',async()=>{
   const f=fixture(),notice=f.data.flowNotifications[0];
@@ -165,11 +175,11 @@ test('a local release permit is atomically written only after exact external car
   const evidence=releaseEvidence(f,checkedAt);
   try{
     assert.equal(readNextDayReleasePermit(file,{publicKey}),null);
-    assert.throws(()=>installNextDayReleasePermit(file,{manifest:releaseManifestAt(f,checkedAt),
+    assert.throws(()=>installNextDayReleasePermit(file,{...releasePolicyOptions(f),manifest:releaseManifestAt(f,checkedAt),
       evidence:{...evidence,cardMessages:evidence.cardMessages.slice(0,1)},privateKey,clock:()=>checkedAt}),/派工卡独立读回/);
     assert.equal(readNextDayReleasePermit(file,{publicKey}),null);
     assert.throws(()=>installNextDayReleasePermit(file,{manifest:releaseManifestAt(f,checkedAt),evidence,clock:()=>checkedAt}),/发布私钥/);
-    const permit=installNextDayReleasePermit(file,{manifest:releaseManifestAt(f,checkedAt),evidence,privateKey,clock:()=>checkedAt});
+    const permit=installNextDayReleasePermit(file,{...releasePolicyOptions(f),manifest:releaseManifestAt(f,checkedAt),evidence,privateKey,clock:()=>checkedAt});
     assert.equal(readNextDayReleasePermit(file),null,'missing verifier is always OFF');
     assert.deepEqual(readNextDayReleasePermit(file,{publicKey}),permit);
     if(process.platform==='linux'){
@@ -178,13 +188,15 @@ test('a local release permit is atomically written only after exact external car
     }
     assert.equal(permit.businessDate,'2026-09-25');
     assert.equal(permit.groupChatId,'oc_3f92ef62d6160399ee823e74def199e6');
+    assert.equal(permit.readinessPolicyHash,releasePolicyOptions(f).externallyPinnedPolicyHash);
+    assert.equal(permit.evidenceHash,sha({evidence,readinessPolicyHash:permit.readinessPolicyHash}));
     assert.ok(Date.parse(permit.expiresAt)<=Date.parse('2026-09-24T16:30:00+08:00'));
     assert.equal(JSON.stringify(f.data),original,'permit installation never touches the active task/card ledger');
     const renewedAt=Date.parse('2026-09-24T16:20:00+08:00');
     let renewed;
     f.job.runtime.store.transaction(s=>{
       s.tasks[0].runtime.nodes[0].liveAcknowledgements=[{kind:'live_ack',attempt:1,by:'A',at:new Date(renewedAt).toISOString()}];
-      renewed=installNextDayReleasePermit(file,{manifest:{...f.manifest,preparedAt:new Date(renewedAt).toISOString()},
+      renewed=installNextDayReleasePermit(file,{...releasePolicyOptions(f),manifest:{...f.manifest,preparedAt:new Date(renewedAt).toISOString()},
         evidence:releaseEvidence(f,renewedAt),privateKey,clock:()=>renewedAt});
     });
     assert.equal(f.data.tasks[0].runtime.nodes[0].liveAcknowledgements.length,1,
@@ -192,7 +204,7 @@ test('a local release permit is atomically written only after exact external car
     assert.equal(renewed.scopeHash,permit.scopeHash,'a renewed permit cannot widen the release claim');
     assert.ok(Date.parse(renewed.expiresAt)>Date.parse(permit.expiresAt));
     assert.notEqual(renewed.activationNonce,permit.activationNonce,'each activation receives a fresh nonce');
-    assert.throws(()=>installNextDayReleasePermit(file,{manifest:{...f.manifest,businessDate:'2026-09-26'},
+    assert.throws(()=>installNextDayReleasePermit(file,{...releasePolicyOptions(f),manifest:{...f.manifest,businessDate:'2026-09-26'},
       evidence,privateKey,clock:()=>checkedAt}),/签名|范围|日期/);
     assert.equal(JSON.parse(readFileSync(file,'utf8')).scopeHash,renewed.scopeHash);
   }finally{if(readNextDayReleasePermit(file,{publicKey}))unlinkSync(file);rmdirSync(dir);}
@@ -205,7 +217,7 @@ test('POSIX read-only permit mount is readable by a different Hub UID without ex
   mkdirSync(directory,{mode:0o755});
   if(process.platform==='linux')chmodSync(directory,0o755);
   try{
-    const permit=installNextDayReleasePermit(file,{manifest:releaseManifestAt(f,firstActivationAt),
+    const permit=installNextDayReleasePermit(file,{...releasePolicyOptions(f),manifest:releaseManifestAt(f,firstActivationAt),
       evidence:releaseEvidence(f,firstActivationAt),privateKey,clock:()=>firstActivationAt});
     assert.deepEqual(readNextDayReleasePermit(file,{publicKey}),permit);
     assert.deepEqual(readdirSync(directory),['permit.json'],'the private signing key is never written to the mounted directory');
@@ -232,7 +244,7 @@ test('an already activated permit is not misreported as failed when lock cleanup
   const previousLog=console.error;
   try{
     console.error=()=>{throw Error('release logger unavailable');};
-    const permit=installNextDayReleasePermit(file,{manifest:releaseManifestAt(f,firstActivationAt),
+    const permit=installNextDayReleasePermit(file,{...releasePolicyOptions(f),manifest:releaseManifestAt(f,firstActivationAt),
       evidence:releaseEvidence(f,firstActivationAt),privateKey,clock:()=>{
         if(++ticks===2)unlinkSync(file+'.install.lock');
         return firstActivationAt;
@@ -247,7 +259,7 @@ test('signed permit is OFF for an absent key, wrong key, legacy format or change
   const pair=generateKeyPairSync('ed25519'),other=generateKeyPairSync('ed25519');
   const now=firstActivationAt,evidence=releaseEvidence(f,now);
   try{
-    const permit=installNextDayReleasePermit(file,{manifest:releaseManifestAt(f,now),evidence,
+    const permit=installNextDayReleasePermit(file,{...releasePolicyOptions(f),manifest:releaseManifestAt(f,now),evidence,
       privateKey:pair.privateKey,clock:()=>now});
     const publicDer=pair.publicKey.export({format:'der',type:'spki'}).toString('base64');
     assert.equal(readNextDayReleasePermit(file),null);
@@ -258,6 +270,8 @@ test('signed permit is OFF for an absent key, wrong key, legacy format or change
       {...permit,activationNonce:'00000000-0000-4000-8000-000000000000'},
       {...permit,expiresAt:new Date(now+31*60000).toISOString()},
       {...permit,version:1},
+      {...permit,readinessPolicyHash:'f'.repeat(64)},
+      {...permit,readinessPolicyHash:undefined},
       {...permit,signature:undefined},
     ]){
       writeFileSync(file,JSON.stringify(changed));
@@ -280,10 +294,10 @@ test('a message ID alone cannot authorize a person: every card needs exact recip
     for(const change of modify){
       const evidence=releaseEvidence(f,now);
       change(evidence.cardMessages[0]);
-      assert.throws(()=>installNextDayReleasePermit(file,{manifest:releaseManifestAt(f,now),evidence,
+      assert.throws(()=>installNextDayReleasePermit(file,{...releasePolicyOptions(f),manifest:releaseManifestAt(f,now),evidence,
         privateKey,clock:()=>now}),/目标本人 open_id 与会话归属的独立读回/);
     }
-    assert.throws(()=>installNextDayReleasePermit(file,{manifest:releaseManifestAt(f,now),
+    assert.throws(()=>installNextDayReleasePermit(file,{...releasePolicyOptions(f),manifest:releaseManifestAt(f,now),
       evidence:{...releaseEvidence(f,now),cardMessages:f.manifest.refs.map(r=>({
         cardNoticeId:r.cardNoticeId,cardMessageId:r.cardMessageId}))},
       privateKey,clock:()=>now}),/目标本人 open_id 与会话归属的独立读回/);
@@ -309,7 +323,7 @@ test('permit signer rejects incomplete same-version source, group and ledger pre
     const {privateKey}=generateKeyPairSync('ed25519'),at=firstActivationAt;
     try{
       const evidence=releaseEvidence(f,at);change(evidence);
-      assert.throws(()=>installNextDayReleasePermit(file,{manifest:releaseManifestAt(f,at),
+      assert.throws(()=>installNextDayReleasePermit(file,{...releasePolicyOptions(f),manifest:releaseManifestAt(f,at),
         evidence,privateKey,clock:()=>at}),/预检证据|完整独立预检/);
       assert.equal(existsSync(file),false);
     }finally{if(existsSync(file))unlinkSync(file);rmdirSync(dir);}
@@ -334,7 +348,7 @@ test('permit signer binds preflight to frozen card ID and requires complete bot-
     const {privateKey}=generateKeyPairSync('ed25519'),at=firstActivationAt;
     try{
       const evidence=releaseEvidence(f,at);change(f,evidence);
-      assert.throws(()=>installNextDayReleasePermit(file,{manifest:releaseManifestAt(f,at),
+      assert.throws(()=>installNextDayReleasePermit(file,{...releasePolicyOptions(f),manifest:releaseManifestAt(f,at),
         evidence,privateKey,clock:()=>at}),/许可清单不一致|独立读回/);
       assert.equal(existsSync(file),false);
     }finally{if(existsSync(file))unlinkSync(file);rmdirSync(dir);}
@@ -348,10 +362,109 @@ test('permit signer accepts a complete bot read-user proof for the exact card',(
     const evidence=releaseEvidence(f,at),proof=evidence.cardMessages[0].recipientReadback;
     proof.kind='read_user';proof.messageId=evidence.cardMessages[0].cardMessageId;
     proof.readUserIds=[evidence.cardMessages[0].recipientId];delete proof.memberIds;
-    const permit=installNextDayReleasePermit(file,{manifest:releaseManifestAt(f,at),
+    const canonical=evidence.readiness.evidence.cardReadbacks.find(row=>row.messageId===proof.messageId);
+    canonical.recipientProof=structuredClone(proof);
+    const permit=installNextDayReleasePermit(file,{...releasePolicyOptions(f),manifest:releaseManifestAt(f,at),
       evidence,privateKey,clock:()=>at});
     assert.equal(permit.scopeHash,f.manifest.scopeHash);
   }finally{if(existsSync(file))unlinkSync(file);rmdirSync(dir);}
+});
+
+test('permit signing requires a separately pinned policy and digest without an evidence fallback',()=>{
+  const f=fixture(),dir=permitTestDirectory('wis-next-day-pinned-policy-'),file=join(dir,'permit.json');
+  const {privateKey}=generateKeyPairSync('ed25519'),at=firstActivationAt;
+  const approved=releasePolicyOptions(f),evidence=releaseEvidence(f,at);
+  const cases=[{},
+    {readinessPolicy:approved.readinessPolicy},
+    {externallyPinnedPolicyHash:approved.externallyPinnedPolicyHash},
+    {...approved,externallyPinnedPolicyHash:'0'.repeat(64)},
+    {...approved,readinessPolicy:{...approved.readinessPolicy,approvedGroupTestMessageId:'om_other_test'}},
+  ];
+  try{
+    for(const options of cases){
+      assert.throws(()=>installNextDayReleasePermit(file,{...options,
+        manifest:releaseManifestAt(f,at),evidence,privateKey,clock:()=>at}),/独立固定预检策略/);
+      assert.equal(existsSync(file),false);
+    }
+    const selfPinned={...evidence,readiness:{...evidence.readiness,policy:approved.readinessPolicy}};
+    assert.throws(()=>installNextDayReleasePermit(file,{...approved,
+      manifest:releaseManifestAt(f,at),evidence:selfPinned,privateKey,clock:()=>at}),/证据自带策略/);
+    assert.throws(()=>installNextDayReleasePermit(file,{...approved,
+      manifest:releaseManifestAt(f,at),evidence:{...evidence,policy:approved.readinessPolicy},
+      privateKey,clock:()=>at}),/证据自带策略/);
+    assert.equal(existsSync(file),false);
+  }finally{if(existsSync(file))unlinkSync(file);rmdirSync(dir);}
+});
+
+test('evidence cannot self-anchor new unknowns, changed images or an unapproved group test ID',()=>{
+  const changes=[
+    (readback,forgedPolicy)=>{
+      const row={id:'new-unknown',key:'new-unknown',kind:'overdue',state:'unknown',unknown:true};
+      readback.state.notifications.push(row);forgedPolicy.historicalUnknownHash=sha([row]);
+    },
+    (readback,forgedPolicy)=>{
+      readback.environment.services.hub.image='sha256:'+'f'.repeat(64);
+      forgedPolicy.containers.hub.image=readback.environment.services.hub.image;
+    },
+    (readback,forgedPolicy)=>{
+      readback.groupTest.messageId='om_not_independently_approved';
+      forgedPolicy.approvedGroupTestMessageId=readback.groupTest.messageId;
+    },
+  ];
+  for(const change of changes){
+    const f=fixture(),dir=permitTestDirectory('wis-next-day-self-anchor-'),file=join(dir,'permit.json');
+    const {privateKey}=generateKeyPairSync('ed25519'),at=firstActivationAt;
+    const approved=releasePolicyOptions(f),evidence=releaseEvidence(f,at);
+    const forgedPolicy=structuredClone(approved.readinessPolicy);
+    try{
+      change(evidence.readiness.evidence,forgedPolicy);
+      evidence.readiness.policy=forgedPolicy;
+      assert.throws(()=>installNextDayReleasePermit(file,{...approved,
+        manifest:releaseManifestAt(f,at),evidence,privateKey,clock:()=>at}),/证据自带策略/);
+      delete evidence.readiness.policy;
+      assert.throws(()=>installNextDayReleasePermit(file,{...approved,
+        manifest:releaseManifestAt(f,at),evidence,privateKey,clock:()=>at}),/完整独立预检/);
+      assert.throws(()=>installNextDayReleasePermit(file,{...approved,readinessPolicy:forgedPolicy,
+        manifest:releaseManifestAt(f,at),evidence,privateKey,clock:()=>at}),/摘要不匹配/);
+      assert.equal(existsSync(file),false);
+      assert.deepEqual(readdirSync(dir),[]);
+    }finally{if(existsSync(file))unlinkSync(file);rmdirSync(dir);}
+  }
+});
+
+test('the same message ID cannot join conflicting legacy and canonical chat or peer evidence',()=>{
+  const changes=[
+    (legacy)=>{legacy.chatId='oc_differentchat';legacy.messageReadback.chatId=legacy.chatId;
+      legacy.recipientReadback.chatId=legacy.chatId;},
+    (legacy)=>{legacy.messageReadback.senderAppId='cli_someotherbot';},
+    (legacy)=>{legacy.recipientReadback.openId='ou_other';},
+    (legacy)=>{legacy.recipientReadback.kind='read_user';
+      legacy.recipientReadback.messageId=legacy.cardMessageId;
+      legacy.recipientReadback.readUserIds=[legacy.recipientId];delete legacy.recipientReadback.memberIds;},
+    (legacy)=>{legacy.messageReadback.checkedAt=new Date(firstActivationAt-1).toISOString();},
+    (legacy)=>{legacy.recipientReadback.checkedAt=new Date(firstActivationAt-1).toISOString();},
+    (legacy,canonical)=>{
+      for(const proof of [legacy.recipientReadback,canonical.recipientProof]){
+        proof.kind='read_user';proof.messageId=legacy.cardMessageId;
+        proof.readUserIds=[legacy.recipientId];delete proof.memberIds;
+      }
+      legacy.recipientReadback.memberIds=['ou_extra'];
+    },
+    (legacy)=>{legacy.recipientReadback.readUserIds=['ou_unverified'];},
+  ];
+  for(const change of changes){
+    const f=fixture(),dir=permitTestDirectory('wis-next-day-dual-proof-'),file=join(dir,'permit.json');
+    const {privateKey}=generateKeyPairSync('ed25519'),at=firstActivationAt;
+    try{
+      const evidence=releaseEvidence(f,at),legacy=evidence.cardMessages[0];
+      const canonical=evidence.readiness.evidence.cardReadbacks.find(row=>row.messageId===legacy.cardMessageId);
+      change(legacy,canonical);
+      assert.equal(legacy.cardMessageId,canonical.messageId,'the frozen message ID still matches');
+      assert.throws(()=>installNextDayReleasePermit(file,{...releasePolicyOptions(f),
+        manifest:releaseManifestAt(f,at),evidence,privateKey,clock:()=>at}),/证明不一致|独立读回/);
+      assert.equal(existsSync(file),false);
+    }finally{if(existsSync(file))unlinkSync(file);rmdirSync(dir);}
+  }
 });
 
 test('a slow fsync crossing the first activation cutoff leaves no permit file',()=>{
@@ -361,7 +474,7 @@ test('a slow fsync crossing the first activation cutoff leaves no permit file',(
   const after=Date.parse('2026-09-24T15:55:00.001+08:00');
   const times=[before,after];
   try{
-    assert.throws(()=>installNextDayReleasePermit(file,{manifest:releaseManifestAt(f,before),
+    assert.throws(()=>installNextDayReleasePermit(file,{...releasePolicyOptions(f),manifest:releaseManifestAt(f,before),
       evidence:releaseEvidence(f,before),privateKey,clock:()=>times.shift(),
       notAfterMs:Date.parse('2026-09-24T15:55:00+08:00')}),/原子提交时已超出批准时窗/);
     assert.equal(existsSync(file),false);
@@ -370,17 +483,84 @@ test('a slow fsync crossing the first activation cutoff leaves no permit file',(
   }finally{rmdirSync(dir);}
 });
 
+test('first activation and renewal recheck nested chat, identity and backup ages after fsync',()=>{
+  const nested=[
+    readback=>readback.cardReadbacks[0].personalChat,
+    readback=>readback.identityReadbacks[0],
+    readback=>readback.environment.backup.hub,
+  ];
+  for(const renewal of [false,true])for(const select of nested){
+    const f=fixture(),dir=permitTestDirectory('wis-next-day-commit-age-'),file=join(dir,'permit.json');
+    const {privateKey,publicKey}=generateKeyPairSync('ed25519');
+    const at=renewal?firstActivationAt+60000:firstActivationAt;
+    let original=null;
+    try{
+      if(renewal){
+        installNextDayReleasePermit(file,{...releasePolicyOptions(f),
+          manifest:releaseManifestAt(f,firstActivationAt),evidence:releaseEvidence(f,firstActivationAt),
+          privateKey,clock:()=>firstActivationAt});
+        original=readFileSync(file,'utf8');
+      }
+      const evidence=releaseEvidence(f,at),times=[at,at+1000];
+      select(evidence.readiness.evidence).checkedAt=new Date(at-119500).toISOString();
+      assert.throws(()=>installNextDayReleasePermit(file,{...releasePolicyOptions(f),
+        manifest:releaseManifestAt(f,at),evidence,privateKey,clock:()=>times.shift()}),/完整独立预检/);
+      if(renewal){
+        assert.equal(readFileSync(file,'utf8'),original,'failed renewal preserves the old signed permit');
+        assert.ok(readNextDayReleasePermit(file,{publicKey}));
+      }else{
+        assert.equal(existsSync(file),false,'failed first activation never publishes a permit');
+        assert.equal(readNextDayReleasePermit(file,{publicKey}),null);
+      }
+      assert.deepEqual(readdirSync(dir),renewal?['permit.json']:[],'temporary file and lock are cleaned');
+    }finally{if(existsSync(file))unlinkSync(file);rmdirSync(dir);}
+  }
+});
+
+test('commit clock callback cannot replace signed evidence during first activation or renewal',()=>{
+  const mutate=[
+    evidence=>{evidence.readiness.evidence.groupTest.exactTestMarker=false;},
+    evidence=>{evidence.operator='different-operator';},
+  ];
+  for(const renewal of [false,true])for(const change of mutate){
+    const f=fixture(),dir=permitTestDirectory('wis-next-day-commit-digest-'),file=join(dir,'permit.json');
+    const {privateKey,publicKey}=generateKeyPairSync('ed25519');
+    const at=renewal?firstActivationAt+60000:firstActivationAt;
+    let original=null,ticks=0;
+    try{
+      if(renewal){
+        installNextDayReleasePermit(file,{...releasePolicyOptions(f),
+          manifest:releaseManifestAt(f,firstActivationAt),evidence:releaseEvidence(f,firstActivationAt),
+          privateKey,clock:()=>firstActivationAt});
+        original=readFileSync(file,'utf8');
+      }
+      const evidence=releaseEvidence(f,at);
+      assert.throws(()=>installNextDayReleasePermit(file,{...releasePolicyOptions(f),
+        manifest:releaseManifestAt(f,at),evidence,privateKey,clock:()=>{
+          if(++ticks===2)change(evidence);
+          return at;
+        }}),/签名证据或固定策略摘要已变化/);
+      assert.equal(ticks,2,'mutation happens only after the signed snapshot and fsync');
+      if(renewal){
+        assert.equal(readFileSync(file,'utf8'),original);
+        assert.ok(readNextDayReleasePermit(file,{publicKey}));
+      }else assert.equal(existsSync(file),false);
+      assert.deepEqual(readdirSync(dir),renewal?['permit.json']:[]);
+    }finally{if(existsSync(file))unlinkSync(file);rmdirSync(dir);}
+  }
+});
+
 test('a first permit after 15:55 and an expired renewal cannot catch up',()=>{
   const f=fixture(),dir=permitTestDirectory('wis-next-day-late-'),file=join(dir,'permit.json');
   const {privateKey}=generateKeyPairSync('ed25519');
   const first=firstActivationAt,later=Date.parse('2026-09-24T16:30:00+08:00');
   try{
-    assert.throws(()=>installNextDayReleasePermit(file,{manifest:releaseManifestAt(f,later),
+    assert.throws(()=>installNextDayReleasePermit(file,{...releasePolicyOptions(f),manifest:releaseManifestAt(f,later),
       evidence:releaseEvidence(f,later),privateKey,clock:()=>later}),/首次激活必须在上海时间 15:55 前/);
     assert.equal(existsSync(file),false);
-    installNextDayReleasePermit(file,{manifest:releaseManifestAt(f,first),
+    installNextDayReleasePermit(file,{...releasePolicyOptions(f),manifest:releaseManifestAt(f,first),
       evidence:releaseEvidence(f,first),privateKey,clock:()=>first});
-    assert.throws(()=>installNextDayReleasePermit(file,{manifest:releaseManifestAt(f,later),
+    assert.throws(()=>installNextDayReleasePermit(file,{...releasePolicyOptions(f),manifest:releaseManifestAt(f,later),
       evidence:releaseEvidence(f,later),privateKey,clock:()=>later}),/首次激活必须在上海时间 15:55 前/);
   }finally{unlinkSync(file);rmdirSync(dir);}
 });
@@ -390,13 +570,13 @@ test('same Hub rejects rollback to an older signed activation and clock rollback
   const {privateKey,publicKey}=generateKeyPairSync('ed25519');
   let now=firstActivationAt;
   try{
-    const original=installNextDayReleasePermit(file,{manifest:releaseManifestAt(f,now),evidence:releaseEvidence(f,now),
+    const original=installNextDayReleasePermit(file,{...releasePolicyOptions(f),manifest:releaseManifestAt(f,now),evidence:releaseEvidence(f,now),
       privateKey,clock:()=>now});
     const reader=createNextDayReleaseReader(file,{publicKey,releaseId:f.job.releaseId,
       bootId:f.job.bootId,clock:()=>now});
     assert.deepEqual(reader(),original);
     now+=20*60000;
-    const renewed=installNextDayReleasePermit(file,{manifest:{...f.manifest,preparedAt:new Date(now).toISOString()},
+    const renewed=installNextDayReleasePermit(file,{...releasePolicyOptions(f),manifest:{...f.manifest,preparedAt:new Date(now).toISOString()},
       evidence:releaseEvidence(f,now),privateKey,clock:()=>now});
     assert.deepEqual(reader(),renewed);
     writeFileSync(file,JSON.stringify(original));
@@ -414,7 +594,7 @@ test('signed activation is permanently closed after local clock moves backward',
   const {privateKey,publicKey}=generateKeyPairSync('ed25519');
   let now=firstActivationAt;
   try{
-    const permit=installNextDayReleasePermit(file,{manifest:releaseManifestAt(f,now),evidence:releaseEvidence(f,now),
+    const permit=installNextDayReleasePermit(file,{...releasePolicyOptions(f),manifest:releaseManifestAt(f,now),evidence:releaseEvidence(f,now),
       privateKey,clock:()=>now});
     const reader=createNextDayReleaseReader(file,{publicKey,releaseId:f.job.releaseId,
       bootId:f.job.bootId,clock:()=>now});
@@ -435,7 +615,7 @@ test('unactivated Hub queues nothing, then a signed permit is checked again befo
   try{
     await f.job.tick();
     assert.equal(f.data.flowNotifications.filter(n=>n.kind.startsWith('live_tomorrow')).length,0);
-    installNextDayReleasePermit(file,{manifest:releaseManifestAt(f,firstActivationAt),
+    installNextDayReleasePermit(file,{...releasePolicyOptions(f),manifest:releaseManifestAt(f,firstActivationAt),
       evidence:releaseEvidence(f,firstActivationAt),privateKey,clock:()=>firstActivationAt});
     f.advance();
     await f.job.tick();

@@ -19,20 +19,37 @@ const boundedIssue=e=>String(e?.code||e?.status||e?.name||'readback_failed').sli
 const required=['readTopology','readOfficialSource','readApprovedBindings','readIdentity',
   'deriveRoomSlots','readHubState','readCardMessage','readPersonalChat','readPersonalPeer','cardMatches',
   'readGroup','readGroupTest','readBackup','readOaPage'];
+// Keep each row's evidence and issues in source order even when GETs finish
+// out of order. A worker runs one row at a time, so all per-row reads share
+// the same small in-flight bound; no background reads survive this phase.
+const mapBounded=async(rows,concurrency,read)=>{
+  const results=new Array(rows.length);let next=0;
+  await Promise.all(Array.from({length:Math.min(concurrency,rows.length)},async()=>{
+    while(next<rows.length){const index=next++;results[index]=await read(rows[index]);}
+  }));
+  return results;
+};
 
-export async function collectReadOnlyEvidence({ops,policy,now=Date.now()}={}){
+export async function collectReadOnlyEvidence({ops,policy,now=Date.now(),concurrency=4}={}){
+  if(!Number.isInteger(concurrency)||concurrency<1||concurrency>4)
+    throw new Error('Read-only collector concurrency must be an integer from 1 to 4');
   if(!ops||required.some(name=>typeof ops[name]!=='function'))
     throw new Error('Read-only collector adapter incomplete');
-  const issues=[],date=dateAt(now+86400000),attempt=async(code,fn,fallback=null)=>{
-    try{return await fn();}catch(error){issues.push(code+':'+boundedIssue(error));return fallback;}
+  const issues=[],date=dateAt(now+86400000),attemptInto=target=>async(code,fn,fallback=null)=>{
+    try{return await fn();}catch(error){target.push(code+':'+boundedIssue(error));return fallback;}
   };
+  const attempt=attemptInto(issues);
   const first=await attempt('topology_initial',()=>ops.readTopology());
   const source=await attempt('official_source',()=>ops.readOfficialSource(date,{fresh:true}));
   const bindings=await attempt('approved_bindings',()=>ops.readApprovedBindings(),[]);
   const identityReadbacks=[];
-  for(const person of bindings||[]){
-    const row=await attempt('person_identity',()=>ops.readIdentity(person.openId,person.number));
-    if(row)identityReadbacks.push({...row,number:person.number});
+  const identityResults=await mapBounded(bindings||[],concurrency,async person=>{
+    const rowIssues=[],row=await attemptInto(rowIssues)('person_identity',()=>
+      ops.readIdentity(person.openId,person.number));
+    return {issues:rowIssues,row:row&&{...row,number:person.number}};
+  });
+  for(const result of identityResults){
+    issues.push(...result.issues);if(result.row)identityReadbacks.push(result.row);
   }
   const rooms=source?.rooms||[],slots=[];
   for(const room of rooms){
@@ -48,30 +65,39 @@ export async function collectReadOnlyEvidence({ops,policy,now=Date.now()}={}){
   const notifications=rawState?.flowNotifications||[];
   const targetIds=new Set(tasks.filter(t=>t.workflow==='04'&&t.liveSession?.date===date).map(t=>t.id));
   const cards=notifications.filter(n=>n.kind==='live_assignment'&&targetIds.has(n.taskId));
-  const cardReadbacks=[];
-  for(const card of cards){
-    if(!card.messageId){issues.push('card_message_id_missing');continue;}
-    const message=await attempt('card_mget',()=>ops.readCardMessage(card.messageId));
-    if(!message)continue;
+  const cardReadbacks=[],chatReads=new Map();
+  // Chat detail describes only the bot's chat, not a card's recipient. Cache
+  // that read within this collection, but never cache message-specific peers
+  // or read_users across cards sharing a chat.
+  const readChat=chatId=>{
+    if(!chatReads.has(chatId))chatReads.set(chatId,
+      Promise.resolve().then(()=>ops.readPersonalChat(chatId)));
+    return chatReads.get(chatId);
+  };
+  const cardResults=await mapBounded(cards,concurrency,async card=>{
+    const rowIssues=[],rowAttempt=attemptInto(rowIssues),finish=row=>({issues:rowIssues,row});
+    if(!card.messageId){rowIssues.push('card_message_id_missing');return finish(null);}
+    const message=await rowAttempt('card_mget',()=>ops.readCardMessage(card.messageId));
+    if(!message)return finish(null);
     // The ledger ID is only a lookup key. The independent bot GET response
     // must identify the same message before any chat/peer evidence is trusted.
     if(message.messageId!==card.messageId){
-      issues.push('card_independent_message_id_mismatch');continue;
+      rowIssues.push('card_independent_message_id_mismatch');return finish(null);
     }
     const task=rawState.tasks.find(t=>t.id===card.taskId);
-    const matches=await attempt('card_immutable_match',()=>ops.cardMatches(card,task,message),false);
-    const chat=await attempt('bot_p2p_chat',()=>ops.readPersonalChat(message.chatId));
+    const matches=await rowAttempt('card_immutable_match',()=>ops.cardMatches(card,task,message),false);
+    const chat=await rowAttempt('bot_p2p_chat',()=>readChat(message.chatId));
     const personalChat=chat&&{chatId:chat.chatId,mode:chat.mode,status:chat.status,
       checkedAs:chat.checkedAs,checkedAt:chat.checkedAt};
     const isBotP2p=/^oc_[A-Za-z0-9_-]+$/u.test(message.chatId||'')&&
       personalChat?.chatId===message.chatId&&
       personalChat.mode==='p2p'&&personalChat.status==='normal'&&
       personalChat.checkedAs==='bot';
-    if(!isBotP2p)issues.push('card_not_bot_p2p');
+    if(!isBotP2p)rowIssues.push('card_not_bot_p2p');
     // Never use a group's read_users as the personal-card recipient proof.
     const peer=isBotP2p?
-      await attempt('bot_p2p_peer',()=>ops.readPersonalPeer(message.chatId,card.messageId)):null;
-    cardReadbacks.push({messageId:card.messageId,independentMessageId:message.messageId,
+      await rowAttempt('bot_p2p_peer',()=>ops.readPersonalPeer(message.chatId,card.messageId)):null;
+    return finish({messageId:card.messageId,independentMessageId:message.messageId,
       chatId:message.chatId,
       senderAppId:message.senderAppId,msgType:message.msgType,deleted:message.deleted,
       immutableCardMatched:matches===true,checkedAt:message.checkedAt,
@@ -79,6 +105,9 @@ export async function collectReadOnlyEvidence({ops,policy,now=Date.now()}={}){
       recipientProof:peer&&{kind:peer.kind,checkedAs:peer.checkedAs,chatId:peer.chatId,
         openId:peer.openId,checkedAt:peer.checkedAt,messageId:peer.messageId,
         complete:peer.complete,memberIds:peer.memberIds,readUserIds:peer.readUserIds}});
+  });
+  for(const result of cardResults){
+    issues.push(...result.issues);if(result.row)cardReadbacks.push(result.row);
   }
   const groupReadback=await attempt('group_identity',()=>ops.readGroup(policy?.groupId));
   // A test ID must come from an out-of-band approved scope. Do not search
