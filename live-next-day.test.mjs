@@ -78,6 +78,24 @@ const releaseEvidence=(f,checkedAt)=>({operator:'FD-026222',scopeHash:f.manifest
       checkedAt:new Date(checkedAt).toISOString()},recipientReadback:{kind:'p2p_member',
       openId:r.recipientId,chatId:`oc_testcard${index}chat`,checkedAt:new Date(checkedAt).toISOString()}}))});
 
+test('fresh official source evidence records current revision separately from task creation revision',async()=>{
+  const f=fixture(),notice=f.data.flowNotifications[0];
+  const original=f.job.liveSessions.readSchedule;
+  f.job.liveSessions.readSchedule=async(...args)=>{
+    const raw=await original(...args);
+    return {...raw,sourceStatus:Object.fromEntries(Object.entries(raw.sourceStatus)
+      .map(([room,source])=>[room,{...source,revision:16}]))};
+  };
+  const result=await currentOfficialNextDaySource(notice,{runtime:f.job.runtime,
+    liveSessions:f.job.liveSessions,notifier:f.job.notifier,clock:f.now,
+    withEvidence:true});
+  assert.equal(result.verified,true);
+  assert.equal(result.sourceRevision,16);
+  assert.equal(result.sheetId,'NYB2iu');
+  assert.equal(result.sessionSignature,f.slot.signature);
+  assert.equal(f.slot.source.revision,15);
+});
+
 test('only the exact isolated read-only mount path may be configured; no DATA_DIR fallback exists',()=>{
   assert.equal(isolatedNextDayPermitPath({}),null);
   assert.equal(isolatedNextDayPermitPath({FLOW_LIVE_NEXT_DAY_PERMIT_FILE:'/app/data/live-next-day-release-permit.json'}),null);

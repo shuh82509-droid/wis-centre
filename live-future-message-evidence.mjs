@@ -47,9 +47,10 @@ export const futureLivePersonalNotice = (notice, task, liveCards, delivery) => B
 // Caller must use the returned request verbatim; the request must never be
 // recomputed from a new assignment or a changed card after a timeout.
 export function stageFutureLiveIntent(store, {noticeId,leaseId,participants,
-  appId,recipient,delivery,clock=Date.now,validNotice}) {
+  appId,recipient,delivery,sourceProof,clock=Date.now,validNotice}) {
   requireFact(typeof participants?.recipient === 'function' &&
-    typeof participants?.actor === 'function' && typeof validNotice === 'function',
+    typeof participants?.actor === 'function' &&
+    typeof participants?.verified === 'function' && typeof validNotice === 'function',
   '缺少直播本人身份或发送门禁', 503);
   return store.transaction(s => {
     const row = s.flowNotifications?.find(n => n.id === noticeId);
@@ -60,9 +61,13 @@ export function stageFutureLiveIntent(store, {noticeId,leaseId,participants,
       futureLivePersonalNotice(row,task,{has:number=>number===row.recipient},delivery) &&
       validNotice(row,s,task,node),
     '本人通知已有发送意图，或任务、租约已变化；禁止再次 POST', 409);
-    const mapped = participants.recipient(row.recipient);
+    const now=clock(),mapped = participants.recipient(row.recipient);
+    const binding = participants.verified(row.recipient);
     requireFact(mapped?.type === 'open_id' && openId(mapped.id) &&
-      recipient?.type === 'open_id' && mapped.id === recipient.id,
+      recipient?.type === 'open_id' && mapped.id === recipient.id &&
+      binding?.appId === appId && binding?.number === row.recipient &&
+      binding?.openId === mapped.id && Number.isFinite(binding.checkedAt) &&
+      binding.checkedAt <= now && now - binding.checkedAt <= 15 * 60000,
     '没有新鲜核验的本人 open_id', 409);
     const actor = participants.actor({appId,openId:mapped.id,task,nodeId:row.nodeId});
     requireFact(actor?.user?.number === row.recipient && actor.taskId === task.id &&
@@ -72,37 +77,61 @@ export function stageFutureLiveIntent(store, {noticeId,leaseId,participants,
       row.delivery?.msg_type === delivery.msg_type &&
       row.delivery?.channel === delivery.channel,
     '已冻结的通知内容发生变化', 409);
+    const slot = task.runtime.liveSession;
+    requireFact(Number.isSafeInteger(slot?.source?.revision) &&
+      slot.source.revision > 0 && typeof slot.source.sheetId === 'string' &&
+      slot.source.sheetId.length > 0 && typeof slot.signature === 'string' &&
+      slot.signature.length > 0 && !slot.sourceIssue,
+    '本人通知缺少已核验的正式班表来源', 409);
+    const checkedAt=Date.parse(sourceProof?.checkedAt);
+    requireFact(sourceProof?.verified===true && sourceProof.noticeId===row.id &&
+      sourceProof.taskId===task.id && sourceProof.businessDate===slot.date &&
+      sourceProof.roomCode===slot.roomCode &&
+      sourceProof.sessionSignature===slot.signature &&
+      sourceProof.sheetId===slot.source.sheetId &&
+      Number.isSafeInteger(sourceProof.sourceRevision) &&
+      sourceProof.sourceRevision>0 && Number.isFinite(checkedAt) &&
+      checkedAt<=now && now-checkedAt<=45000,
+    '发送前未取得当前正式班表修订与场次核验', 409);
     const request = {receive_id:mapped.id,msg_type:delivery.msg_type,
       uuid:sha(row.id).slice(0,32),content:delivery.content};
+    const body = JSON.stringify(request);
     const identityHash = delivery.msg_type === 'interactive'
       ? expectedCardIdentity(delivery.content)
       : sha(JSON.parse(delivery.content).text);
     requireFact(identityHash && (delivery.msg_type !== 'text' ||
       typeof JSON.parse(delivery.content).text === 'string'),
     '通知正文不完整', 409);
-    row.futureEvidence = {version:1,phase:'prepared',appId,
+    row.futureEvidence = {version:2,phase:'prepared',appId,
       noticeId:row.id,taskId:task.id,nodeId:node.id,attempt:row.attempt,
-      ownerNumber:row.recipient,leaseId,receiveIdType:'open_id',
-      receiveId:mapped.id,requestHash:sha(JSON.stringify(request)),
+      recipientNumber:row.recipient,leaseId,receiveIdType:'open_id',
+      receiveId:mapped.id,uuid:request.uuid,requestHash:sha(body),
       contentHash:sha(delivery.content),identityHash,msgType:delivery.msg_type,
-      businessDate:task.runtime.liveSession.date,
-      sessionSignature:task.runtime.liveSession.signature,
-      preparedAt:new Date(clock()).toISOString()};
-    return {receiveIdType:'open_id',request};
+      businessDate:slot.date,taskSourceRevision:slot.source.revision,
+      sourceRevision:sourceProof.sourceRevision,
+      sheetId:slot.source.sheetId,sessionSignature:slot.signature,
+      sourceCheckedAt:sourceProof.checkedAt,
+      bindingCheckedAt:new Date(binding.checkedAt).toISOString(),
+      preparedAt:new Date(now).toISOString()};
+    // The caller POSTs this exact byte string. It is returned from the durable
+    // transaction and is never rebuilt from a later assignment or card state.
+    return {receiveIdType:'open_id',body,request};
   });
 }
 
 // A complete native acknowledgement is *not* human delivery. It only permits
 // a read-only mget phase. Missing fields or an ambiguous HTTP result freeze.
-export function recordFutureLiveResponse(store,{noticeId,leaseId,request,response,httpOk,clock=Date.now}) {
+export function recordFutureLiveResponse(store,{noticeId,leaseId,body,response,httpOk,clock=Date.now}) {
   return store.transaction(s => {
     const row = s.flowNotifications?.find(n => n.id === noticeId);
     const evidence = row?.futureEvidence;
+    let request;
+    try { request=JSON.parse(body); } catch { /* A changed request is never accepted as evidence. */ }
     requireFact(row?.state === 'sending' && row.leaseId === leaseId &&
       evidence?.phase === 'prepared' && evidence.leaseId === leaseId &&
-      evidence.requestHash === sha(JSON.stringify(request)) &&
-      request.receive_id === evidence.receiveId && request.msg_type === evidence.msgType &&
-      sha(request.content || '') === evidence.contentHash,
+      typeof body === 'string' && evidence.requestHash === sha(body) &&
+      request?.receive_id === evidence.receiveId && request?.msg_type === evidence.msgType &&
+      request?.uuid === evidence.uuid && sha(request?.content || '') === evidence.contentHash,
     '平台响应无法绑定原始发送意图', 409);
     const result = response?.data;
     if (httpOk !== true || response?.code !== 0 ||

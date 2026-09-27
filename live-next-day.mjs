@@ -68,10 +68,10 @@ export function currentNextDayGroup(notice,s,now){
 // persisted task can lag a sheet edit until the next auto-dispatch tick, so a
 // task/signature check alone does not prove the recipient is still scheduled.
 // This protects both next-day reminders and all source-bound live task cards.
-export async function currentOfficialNextDaySource(notice,{runtime,liveSessions,notifier,readReleasePermit=()=>null,releaseId=null,bootId=null,clock=Date.now}={}){
+export async function currentOfficialNextDaySource(notice,{runtime,liveSessions,notifier,readReleasePermit=()=>null,releaseId=null,bootId=null,clock=Date.now,withEvidence=false}={}){
   if(!runtime?.store)return false;
   const snapshot=runtime.store.read(),noticeTask=snapshot.tasks.find(t=>t.id===notice?.taskId);
-  if(!needsOfficialLiveSource(notice,noticeTask))return true;
+  if(!needsOfficialLiveSource(notice,noticeTask))return withEvidence?false:true;
   const nextDay=nextDayKinds.has(notice.kind),businessDate=nextDay?notice.businessDate:noticeTask?.runtime?.liveSession?.date;
   if(!liveSessions?.readSchedule||!/^20\d{2}-\d{2}-\d{2}$/u.test(businessDate||''))return false;
   const refs=notice.kind==='live_tomorrow'
@@ -96,10 +96,18 @@ export async function currentOfficialNextDaySource(notice,{runtime,liveSessions,
     try{
       const manifest=nextDayReleaseManifest({raw,snapshot:current,people:runtime.people(),participants:runtime.liveParticipants,
         recipient:number=>notifier?.recipient(number),date:businessDate,now:clock(),releaseId,bootId});
-      return currentNextDayRelease(readReleasePermit(),{manifest,notice,now:clock(),releaseId,bootId});
+      if(!currentNextDayRelease(readReleasePermit(),{manifest,notice,now:clock(),releaseId,bootId}))return false;
     }catch{return false;}
   }
-  return true;
+  if(!withEvidence)return true;
+  const session=current.tasks.find(t=>t.id===notice.taskId)?.runtime?.liveSession;
+  const source=raw.sourceStatus?.[session?.roomCode];
+  if(!source?.found||!Number.isSafeInteger(source.revision)||source.revision<=0||
+    !source.sheetId||source.sheetId!==session?.source?.sheetId)return false;
+  return {verified:true,noticeId:notice.id,taskId:notice.taskId,
+    businessDate,roomCode:session.roomCode,sessionSignature:session.signature,
+    sourceRevision:source.revision,sheetId:source.sheetId,
+    checkedAt:new Date(clock()).toISOString()};
 }
 
 // The official sheet is read afresh. A task is required before a person may

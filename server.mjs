@@ -3102,8 +3102,9 @@ let liveFeishuService=null;
 const flowRuntime = new FlowRuntime(workflowStore, {people:()=>liveFeishuService?.people(flowSources.people())||flowSources.people(),canNotify:number=>flowNotifier.canQueue(number)});
 const flowNotifier = new FlowFeishu(workflowStore, {people:()=>flowSources.people(),
   readNextDayPermit:readLiveNextDayPermit,releaseId:release,bootId:liveNextDayBootId,
-  verifyLiveNoticeSource:notice=>currentOfficialNextDaySource(notice,{runtime:flowRuntime,liveSessions,notifier:flowNotifier,
-    readReleasePermit:readLiveNextDayPermit,releaseId:release,bootId:liveNextDayBootId})});
+  verifyLiveNoticeSource:(notice,options)=>currentOfficialNextDaySource(notice,{runtime:flowRuntime,liveSessions,notifier:flowNotifier,
+    readReleasePermit:readLiveNextDayPermit,releaseId:release,bootId:liveNextDayBootId,
+    withEvidence:options?.withEvidence===true})});
 const flowAccessFor = payload => {
   const user=taskCenterUser(payload), enabled=(payload.workspace?.is_brand_department===true||payload.permissions?.manage_permissions===true)&&!inactiveWorkflowMembers.has(user.number)&&['director','manager','specialist'].includes(user.role)&&payload.access?.allowed_modules?.includes('workflow-engine')===true;
   return configurationAccess({user,enabled,canManage:enabled&&['director','manager'].includes(user.role),department:enabled&&user.role==='director'&&payload.workspace?.dashboard_scope==='department',modules:payload.access?.allowed_modules||[]},readConfigurationGrants(join(dataRoot,'flow-configuration-grants.json')),{inactive:inactiveWorkflowMembers.has(user.number)});

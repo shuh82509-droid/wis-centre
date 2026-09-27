@@ -68,11 +68,12 @@ export class FlowFeishu{
       });
     }
   }
-  async sendFutureLivePersonal({notice,lease,recipient,delivery,token}){
+  async sendFutureLivePersonal({notice,lease,recipient,delivery,sourceProof,token}){
     let prepared;
     try{
       prepared=stageFutureLiveIntent(this.store,{noticeId:notice.id,leaseId:notice.leaseId,
-        participants:this.liveCards.participants,appId:this.appId,recipient,delivery,clock:this.clock,
+        participants:this.liveCards.participants,appId:this.appId,recipient,delivery,
+        sourceProof,clock:this.clock,
         validNotice:(row,s,task,node)=>currentNodeNotice(row,task,node,this.clock())&&
           currentNextDayGroup(row,s,this.clock())&&
           (!isNextDayNotice(row)||currentNextDayReleaseLease(this.readNextDayPermit(),row,this.clock(),
@@ -88,10 +89,10 @@ export class FlowFeishu{
     try{
       const response=await this.fetch('https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type='+prepared.receiveIdType,
         {method:'POST',headers:{'content-type':'application/json',authorization:'Bearer '+token},
-          signal:AbortSignal.timeout(12000),redirect:'error',body:JSON.stringify(prepared.request)});
+          signal:AbortSignal.timeout(12000),redirect:'error',body:prepared.body});
       const body=await response.json();
       const result=recordFutureLiveResponse(this.store,{noticeId:notice.id,leaseId:notice.leaseId,
-        request:prepared.request,response:body,httpOk:response.ok,clock:this.clock});
+        body:prepared.body,response:body,httpOk:response.ok,clock:this.clock});
       if(result.verifying)await this.verifyFutureReadback(notice.id);
     }catch{
       // The POST may have reached Feishu. Never infer failure from an HTTP
@@ -100,12 +101,11 @@ export class FlowFeishu{
     }
   }
   async verifyPendingFutureReadbacks(){
-    if(!this.futureEvidenceEnabled)return;
     const pending=(this.store.read().flowNotifications||[]).filter(n=>n.state==='verifying'&&
       n.futureEvidence?.phase==='verifying'&&(!n.nextVerifyAt||n.nextVerifyAt<=this.clock())).slice(0,5);
     for(const row of pending)await this.verifyFutureReadback(row.id);
   }
-  async flush(){if(this.flushing||!this.enabled||!this.appId||!this.secret)return;this.flushing=true;try{await this.verifyPendingFutureReadbacks();for(let i=0;i<5;i++){
+  async flush(){if(this.flushing||!this.appId||!this.secret)return;this.flushing=true;try{await this.verifyPendingFutureReadbacks();if(!this.enabled)return;for(let i=0;i<5;i++){
    const snapshot=this.store.read();const due=(snapshot.flowNotifications||[]).some(n=>dueForFlush(n,this.clock()));if(!due)break;
    const lease=this.store.transaction(s=>{const n=(s.flowNotifications||[]).find(n=>dueForFlush(n,this.clock()));if(!n)return null;if(n.futureEvidence){n.state='attention';n.unknown=true;n.error='本人消息存在已落盘的发送意图，结果待只读核验；禁止再次 POST';delete n.leaseId;delete n.leaseUntil;return null;}if(holdUncertainNotice(n))return null;if(isNextDayNotice(n)&&!currentNextDayReleaseLease(this.readNextDayPermit(),n,this.clock(),{releaseId:this.releaseId,bootId:this.bootId})){retireInvalidNotice(n,{expiredLease:n.state==='sending'});return null;}const t=s.tasks.find(t=>t.id===n.taskId);const node=t?.runtime.nodes.find(x=>x.id===n.nodeId);const source=t?.runtime.localBusiness||t?.runtime.creative;if(source&&(source.issue||!source.checkedAt||this.clock()-Date.parse(source.checkedAt)>45000)){n.nextAt=this.clock()+30000;return null;}if(t?.runtime.creative&&n.kind==='completed'&&t.runtime.state!=='completed'){retireInvalidNotice(n,{expiredLease:n.state==='sending'});return null;}if(!currentNodeNotice(n,t,node,this.clock())||!currentNextDayGroup(n,s,this.clock())||!t||n.kind==='routing_attention'&&!Object.keys(t.runtime.routingIssues||{}).length||n.kind==='source_attention'&&(!t.runtime.automation?.issue||t.runtime.state!=='running'||n.reason&&n.reason!==t.runtime.automation.issue)||n.kind==='assignment_attention'&&(!t.runtime.assignmentIssue||t.runtime.state!=='running')||n.kind==='handoff_blocked'&&t.runtime.handoff?.state!=='attention'||['ready','overdue','escalated','returned'].includes(n.kind)&&(t.runtime.state!=='running'||node?.state!=='ready'||node.attempt!==n.attempt||n.kind==='ready'&&node.owner.number!==n.recipient)){retireInvalidNotice(n,{expiredLease:n.state==='sending'});return null;}n.firstAttemptAt??=new Date(this.clock()).toISOString();n.state='sending';n.attempts++;n.leaseId=randomUUID();n.leaseUntil=this.clock()+45000;return {notice:n,task:t};});if(!lease)continue;
    const n=lease.notice;
@@ -114,11 +114,19 @@ export class FlowFeishu{
    }
    let state='ready',messageId=null,error='',unknown=false,futureHandled=false,postStarted=false;try{const recipient=this.recipient(n.recipient);if(!recipient){state='attention';error='未找到唯一且在职的飞书收件人映射';}else{
      const delivery=n.delivery||this.delivery(n,lease.task);
+     const requiresFutureEvidence=this.futureEvidenceEnabled&&
+       futureLivePersonalNotice(n,lease.task,this.liveCards,delivery);
      this.store.transaction(s=>{const row=s.flowNotifications.find(x=>x.id===n.id);requireFact(row?.leaseId===n.leaseId,'发送租约已变化',409);row.delivery??=delivery;row.channel=delivery.channel;});
       let refreshAttempt=0;while(true){const token=await this.tenantToken();
+      let sourceProof=null;
       if(needsOfficialLiveSource(n,lease.task)){
         let sourceValid=false;
-        try{sourceValid=Boolean(await this.verifyLiveNoticeSource?.(n));}catch{ /* Unreadable official source must block the POST. */ }
+        try{
+          const checked=await this.verifyLiveNoticeSource?.(n,
+            requiresFutureEvidence?{withEvidence:true}:undefined);
+          sourceValid=requiresFutureEvidence?checked?.verified===true:Boolean(checked);
+          if(requiresFutureEvidence&&sourceValid)sourceProof=checked;
+        }catch{ /* Unreadable official source must block the POST. */ }
         if(!sourceValid){state='attention';unknown=Boolean(n.unknown);error=unknown?'正式班表在通知发送前已变化或无法重新核验；此前发送结果不明，已停止重发，请人工核验原消息':'正式班表在通知发送前已变化或无法重新核验；本次未发送，请主管核对';break;}
       }
      // Token acquisition can yield while a person's card acknowledgement,
@@ -130,8 +138,8 @@ export class FlowFeishu{
        return {valid:Boolean(row?.state==='sending'&&row.leaseId===n.leaseId&&task&&mapped?.id===recipient.id&&mapped?.type===recipient.type&&(!isNextDayNotice(row)||currentNextDayReleaseLease(this.readNextDayPermit(),row,this.clock(),{releaseId:this.releaseId,bootId:this.bootId})&&withinNextDaySendWindow(this.clock()))&&currentNodeNotice(row,task,node,this.clock())&&currentNextDayGroup(row,s,this.clock())),uncertain:Boolean(row?.unknown)};
      });
      if(!fresh.valid){state=fresh.uncertain?'attention':'superseded';unknown=fresh.uncertain;error=fresh.uncertain?'通知已失效；此前发送结果不明，本次未重发，请人工核验原消息':'发送前任务、本人身份或群确认状态已变化，本次未发送';break;}
-     if(this.futureEvidenceEnabled&&futureLivePersonalNotice(n,lease.task,this.liveCards,delivery)){
-       futureHandled=true;await this.sendFutureLivePersonal({notice:n,lease,recipient,delivery,token});break;
+     if(requiresFutureEvidence){
+       futureHandled=true;await this.sendFutureLivePersonal({notice:n,lease,recipient,delivery,sourceProof,token});break;
      }
      postStarted=true;const r=await this.fetch('https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type='+encodeURIComponent(recipient.type),{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer '+token},signal:AbortSignal.timeout(12000),redirect:'error',body:JSON.stringify({receive_id:recipient.id,msg_type:delivery.msg_type,uuid:createHash('sha256').update(n.id).digest('hex').slice(0,32),content:delivery.content})});const d=await r.json();
      if((r.status>=200&&r.status<300||r.status===401||r.status===403)&&[99991663,99991668].includes(d.code)&&refreshAttempt++===0){this.token=null;postStarted=false;continue;}if(r.ok&&d.code===0&&d.data?.message_id){state='sent';messageId=d.data.message_id;}else if(r.ok&&d.code===0){state='attention';unknown=true;error='飞书返回成功但未给出消息 ID，发送结果不明；请独立读回原消息';}else if(r.status===429||[408,409,499].includes(r.status)||r.status>=500){unknown=r.status!==429;error=unknown?'飞书返回结果不明，已停止重发，请人工核验原消息':'飞书暂时限流，原事件将退避重试';}else{state='attention';error='飞书发送失败，错误码 '+String(d.code??r.status);if(d.code===99991663||d.code===99991668)this.token=null;}break;}
