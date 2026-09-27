@@ -3,6 +3,7 @@ import {closeSync,existsSync,fchmodSync,fsyncSync,lstatSync,mkdirSync,openSync,r
 import {dirname} from 'node:path';
 import {scheduleSessions} from './live-session-flow.mjs';
 import {requireFact} from './workflow-store.mjs';
+import {evaluateNextDayEvidence} from './scripts/live-nextday-readiness/readiness-core.mjs';
 
 const WORKBOOK='EuYqssm4WhNwAvtyybKcDdk1ned';
 const WAR_ROOM='oc_3f92ef62d6160399ee823e74def199e6';
@@ -17,6 +18,7 @@ const validIdentity=value=>typeof value==='string'&&/^[A-Za-z0-9][A-Za-z0-9._:-]
 const validNonce=value=>typeof value==='string'&&/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u.test(value);
 const dateAt=ms=>new Date(ms+8*3600000).toISOString().slice(0,10);
 const sha=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const same=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
 const shiftHash=slot=>sha(slot.assistantShifts||[]).slice(0,32);
 const sorted=(rows,key)=>[...rows].sort((a,b)=>String(key(a)).localeCompare(String(key(b))));
 const signedFields=permit=>({version:permit.version,businessDate:permit.businessDate,releaseId:permit.releaseId,
@@ -99,6 +101,48 @@ export function nextDayReleaseManifest({raw,snapshot,people,participants,recipie
   return {...claim,scopeHash:sha(claim),preparedAt:raw.updatedAt};
 }
 
+// Recompute the complete, current-version read-only gate at the signing point.
+// A caller's checksPassed flag or a list of message IDs is never sufficient.
+function requireCompleteReleasePreflight(manifest,evidence,now,mode){
+  const policy=evidence?.readiness?.policy,readback=evidence?.readiness?.evidence;
+  requireFact(policy&&readback,'缺少完整独立预检证据，禁止签发次日许可',409);
+  const result=evaluateNextDayEvidence(readback,{now,mode,policy});
+  requireFact(result.checksPassed&&result.date===manifest.businessDate&&
+    result.sourceRevision===manifest.sourceRevision&&
+    result.expectedCards===manifest.refs.length&&
+    policy.botAppId===evidence.botAppId&&policy.groupId===manifest.groupChatId,
+  '完整独立预检或当前版本未通过，禁止签发次日许可',409);
+  const source=readback.source,rooms=source.rooms,status=source.sourceStatus;
+  const exactSource={workbook:WORKBOOK,revision:manifest.sourceRevision,
+    rooms:sorted(rooms,r=>r.code).map(room=>({code:room.code,
+      sheetId:status[room.code].sheetId,anchors:room.anchors,assistants:room.assistants}))};
+  requireFact(sha(exactSource)===manifest.sourceHash,
+    '预检班表与许可来源版本不一致',409);
+  const tasks=new Map(readback.state.tasks.map(task=>[task.id,task]));
+  const cards=new Map(readback.state.notifications.map(card=>[card.id,card]));
+  const messages=new Map(readback.cardReadbacks.map(row=>[row.messageId,row]));
+  const people=new Map(readback.bindings.map(person=>[person.number,person]));
+  const slots=new Map(source.slots.map(slot=>[slot.key,slot]));
+  const seen=new Set();
+  for(const ref of manifest.refs){
+    const task=tasks.get(ref.taskId),slot=slots.get(ref.sessionKey);
+    const node=task?.nodes?.find(row=>row.id===ref.nodeId&&row.owner===ref.number&&row.attempt===ref.attempt);
+    const card=cards.get(ref.cardNoticeId),message=messages.get(ref.cardMessageId);
+    const key=[ref.taskId,ref.nodeId,ref.attempt,ref.number].join('|');
+    requireFact(!seen.has(key)&&slot?.roomCode===ref.roomCode&&
+      slot.signature===ref.signature&&slot.startAt===ref.startAt&&slot.endAt===ref.endAt&&
+      shiftHash(slot)===ref.shiftFingerprint&&
+      task?.workflow==='04'&&task.state==='running'&&task.liveSession?.key===slot.key&&
+      task.liveSession.signature===slot.signature&&node&&
+      card?.taskId===ref.taskId&&card.nodeId===ref.nodeId&&card.attempt===ref.attempt&&
+      card.recipient===ref.number&&card.messageId===ref.cardMessageId&&
+      people.get(ref.number)?.openId===ref.recipientId&&ref.recipientType==='open_id'&&
+      message?.independentMessageId===ref.cardMessageId,
+    '预检任务、本人、卡片消息 ID 与许可清单不一致',409);
+    seen.add(key);
+  }
+}
+
 // The deployment operator supplies the independent message-ID readback. This
 // function only writes a separate release file; it NEVER edits task-center.json.
 // No HTTP route, environment-only switch or automatic timer can call it.
@@ -145,9 +189,13 @@ export function installNextDayReleasePermit(file,{manifest,evidence,privateKey,c
       row?.recipientType===ref.recipientType&&ref.recipientType==='open_id'&&
       typeof row.chatId==='string'&&/^oc_[A-Za-z0-9]{8,128}$/u.test(row.chatId)&&
       message?.messageId===ref.cardMessageId&&message?.chatId===row.chatId&&
-      message?.senderAppId===evidence.botAppId&&
+      message?.senderAppId===evidence.botAppId&&message?.msgType==='interactive'&&
+      message?.deleted===false&&
       member?.chatId===row.chatId&&member?.openId===ref.recipientId&&
-      ['read_user','p2p_member'].includes(member?.kind)&&
+      member?.checkedAs==='bot'&&member?.complete===true&&
+      (member.kind==='p2p_member'&&same(member.memberIds,[ref.recipientId])||
+        member.kind==='read_user'&&member.messageId===ref.cardMessageId&&
+          same(member.readUserIds,[ref.recipientId]))&&
       Number.isFinite(checkedMessage)&&Number.isFinite(checkedMember)&&
       checkedMessage>=Date.parse(preparedAt)&&checkedMember>=Date.parse(preparedAt)&&
       checkedMessage<=now&&checkedMember<=now&&
@@ -183,6 +231,8 @@ export function installNextDayReleasePermit(file,{manifest,evidence,privateKey,c
       '已有不同范围且尚未到期的次日许可，禁止覆盖',409);
     requireFact(!existing||Date.parse(existing.issuedAt)<now,
       '新的放行许可必须晚于上一份，禁止重用同一签发时刻',409);
+    requireCompleteReleasePreflight(manifest,evidence,now,
+      existing&&Date.parse(existing.expiresAt)>now?'renewal':'activation');
     temp=file+'.'+process.pid+'.'+randomUUID()+'.tmp';
     const fd=openSync(temp,'wx',0o600);
     try{

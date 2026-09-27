@@ -10,7 +10,7 @@ import {NEXT_DAY_PERMIT_MOUNT,isolatedNextDayPermitPath,nextDayReleaseManifest,i
 import {chmodSync,existsSync,mkdirSync,mkdtempSync,readFileSync,readdirSync,statSync,unlinkSync,rmdirSync,writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {generateKeyPairSync} from 'node:crypto';
+import {createHash,generateKeyPairSync} from 'node:crypto';
 import {spawnSync} from 'node:child_process';
 
 function fixture(){
@@ -54,7 +54,8 @@ function fixture(){
       sourceRevision:latest.sourceRevision,roomCodes:latest.roomCodes});
     return latest;
   };
-  return {job,data,nodes,slot,manifest,permit,rearm,advance:()=>{now+=300001;},setNow:v=>{now=Date.parse(v);},now:()=>now};
+  return {job,data,raw,initialData:structuredClone(data),nodes,slot,manifest,permit,rearm,
+    advance:()=>{now+=300001;},setNow:v=>{now=Date.parse(v);},now:()=>now};
 }
 const verifySource=(f,notice)=>currentOfficialNextDaySource(notice,{runtime:f.job.runtime,liveSessions:f.job.liveSessions,
   notifier:f.job.notifier,readReleasePermit:f.job.readReleasePermit,releaseId:f.job.releaseId,
@@ -67,16 +68,69 @@ const permitTestDirectory=prefix=>{
   if(process.platform==='linux')chmodSync(dir,0o755);
   return dir;
 };
+const sha=x=>createHash('sha256').update(JSON.stringify(x)).digest('hex');
+const releaseReadiness=(f,checkedAt)=>{
+  const iso=new Date(checkedAt).toISOString(),cid=letter=>letter.repeat(64);
+  const appId='cli_testbot1234',groupId=f.manifest.groupChatId;
+  const policy={expectedDate:f.manifest.businessDate,workbook:f.raw.source.spreadsheetToken,
+    groupId,botAppId:appId,approvedGroupTestMessageId:'om_group_test',
+    containers:{gateway:{id:cid('a'),image:'sha256:'+cid('1')},
+      hub:{id:cid('b'),image:'sha256:'+cid('2')},
+      calendar:{id:cid('c'),image:'sha256:'+cid('3')},
+      dispatch:{id:cid('d'),image:'sha256:'+cid('4')}},
+    gatewayConfigHash:cid('e'),historicalUnknownHash:sha([]),
+    dataMounts:{hub:'/data/hub',calendar:'/data/calendar',dispatch:'/data/dispatch'},
+    approvedNumbers:['A','B']};
+  const service=key=>({id:policy.containers[key].id,image:policy.containers[key].image,
+    status:'running',health:'healthy',checkedAt:iso,
+    runningRwWriters:[policy.containers[key].id],dormantAutoRestartRw:[],
+    dataMount:{source:policy.dataMounts[key],rw:true}});
+  const tasks=f.initialData.tasks.map(t=>({id:t.id,workflow:'04',state:'running',
+    liveSession:structuredClone(t.runtime.liveSession),nodes:t.runtime.nodes.map(n=>({
+      id:n.id,owner:n.owner.number,state:'pending',attempt:n.attempt}))}));
+  const notifications=f.initialData.flowNotifications.map(n=>({...n,key:'key-'+n.id,unknown:false}));
+  const bindings=[{number:'A',name:'主播甲',openId:'ou_anchor'},
+    {number:'B',name:'助理乙',openId:'ou_assistant'}];
+  const byNumber=new Map(bindings.map(x=>[x.number,x]));
+  const cardReadbacks=notifications.map(n=>({messageId:n.messageId,
+    independentMessageId:n.messageId,chatId:'oc_test'+n.id,
+    senderAppId:appId,msgType:'interactive',deleted:false,immutableCardMatched:true,
+    checkedAt:iso,personalChat:{chatId:'oc_test'+n.id,mode:'p2p',status:'normal',
+      checkedAs:'bot',checkedAt:iso},recipientProof:{kind:'p2p_member',
+      chatId:'oc_test'+n.id,openId:byNumber.get(n.recipient).openId,
+      checkedAs:'bot',checkedAt:iso,complete:true,
+      memberIds:[byNumber.get(n.recipient).openId]}}));
+  return {policy,evidence:{collectorIssues:[],environment:{gateway:{
+    id:policy.containers.gateway.id,image:policy.containers.gateway.image,
+    status:'running',health:'healthy',checkedAt:iso,configHash:policy.gatewayConfigHash,
+    routes:{hub:policy.containers.hub.id,calendar:policy.containers.calendar.id,
+      dispatch:policy.containers.dispatch.id}},services:{hub:service('hub'),
+      calendar:service('calendar'),dispatch:service('dispatch')},
+    backup:{hub:{stoppedWriter:true,verified:true,restoreProbePassed:true,checkedAt:iso,
+      sourceContainerId:policy.containers.hub.id,sourceDataMount:policy.dataMounts.hub}},
+    oaReadback:{authenticated:true,hubId:policy.containers.hub.id,checkedAt:iso}},
+    source:{...structuredClone(f.raw),updatedAt:iso,issues:[],slots:tasks.map(t=>t.liveSession)},
+    bindings,identityReadbacks:bindings.map(x=>({...x,active:true,employed:true,
+      departmentVerified:true,checkedAt:iso})),state:{tasks,notifications},cardReadbacks,
+    groupReadback:{id:groupId,name:'WIS直播战队',mode:'group',private:true,
+      normal:true,botCanSend:true,external:false,checkedAt:iso},
+    groupTest:{messageId:'om_group_test',chatId:groupId,senderAppId:appId,
+      deleted:false,exactTestMarker:true,approvalVerifiedExternally:true,checkedAt:iso}}};
+};
 const releaseEvidence=(f,checkedAt)=>({operator:'FD-026222',scopeHash:f.manifest.scopeHash,
   sourceRevision:f.manifest.sourceRevision,gatewayReleaseId:f.manifest.releaseId,
   gatewayBootId:f.manifest.bootId,gatewayVerified:true,groupChatId:f.manifest.groupChatId,
   checkedAt:new Date(checkedAt).toISOString(),botAppId:'cli_testbot1234',
+  readiness:releaseReadiness(f,checkedAt),
   cardMessages:f.manifest.refs.map((r,index)=>({cardNoticeId:r.cardNoticeId,
     cardMessageId:r.cardMessageId,recipientId:r.recipientId,recipientType:r.recipientType,
     chatId:`oc_testcard${index}chat`,messageReadback:{messageId:r.cardMessageId,
       chatId:`oc_testcard${index}chat`,senderAppId:'cli_testbot1234',
+      msgType:'interactive',deleted:false,
       checkedAt:new Date(checkedAt).toISOString()},recipientReadback:{kind:'p2p_member',
-      openId:r.recipientId,chatId:`oc_testcard${index}chat`,checkedAt:new Date(checkedAt).toISOString()}}))});
+      openId:r.recipientId,chatId:`oc_testcard${index}chat`,checkedAs:'bot',
+      complete:true,memberIds:[r.recipientId],
+      checkedAt:new Date(checkedAt).toISOString()}}))});
 
 test('fresh official source evidence records current revision separately from task creation revision',async()=>{
   const f=fixture(),notice=f.data.flowNotifications[0];
@@ -234,6 +288,70 @@ test('a message ID alone cannot authorize a person: every card needs exact recip
         cardNoticeId:r.cardNoticeId,cardMessageId:r.cardMessageId}))},
       privateKey,clock:()=>now}),/目标本人 open_id 与会话归属的独立读回/);
   }finally{rmdirSync(dir);}
+});
+
+test('permit signer rejects incomplete same-version source, group and ledger preflight',()=>{
+  const mutations=[
+    evidence=>{delete evidence.readiness;},
+    evidence=>{evidence.readiness.evidence.collectorIssues.push('unverified_source');},
+    evidence=>{evidence.readiness.evidence.groupTest.exactTestMarker=false;},
+    evidence=>{evidence.readiness.evidence.groupReadback.botCanSend=false;},
+    evidence=>{evidence.readiness.evidence.state.notifications.push({id:'unknown-new',
+      key:'unknown-new',state:'unknown',unknown:true,kind:'live_assignment'});},
+    evidence=>{evidence.readiness.evidence.state.notifications[0].state='sending';},
+    evidence=>{evidence.readiness.evidence.cardReadbacks[0].recipientProof.complete=false;},
+    evidence=>{evidence.readiness.evidence.source.sourceStatus.wangou.revision++;},
+    evidence=>{evidence.readiness.evidence.environment.backup.hub.verified=false;},
+    evidence=>{evidence.readiness.evidence.environment.oaReadback.authenticated=false;},
+  ];
+  for(const change of mutations){
+    const f=fixture(),dir=permitTestDirectory('wis-next-day-complete-gate-'),file=join(dir,'permit.json');
+    const {privateKey}=generateKeyPairSync('ed25519'),at=firstActivationAt;
+    try{
+      const evidence=releaseEvidence(f,at);change(evidence);
+      assert.throws(()=>installNextDayReleasePermit(file,{manifest:releaseManifestAt(f,at),
+        evidence,privateKey,clock:()=>at}),/预检证据|完整独立预检/);
+      assert.equal(existsSync(file),false);
+    }finally{if(existsSync(file))unlinkSync(file);rmdirSync(dir);}
+  }
+});
+
+test('permit signer binds preflight to frozen card ID and requires complete bot-person proof',()=>{
+  const changes=[
+    (f,evidence)=>{evidence.readiness.evidence.state.notifications[0].messageId='om_replaced';
+      evidence.readiness.evidence.cardReadbacks[0].messageId='om_replaced';
+      evidence.readiness.evidence.cardReadbacks[0].independentMessageId='om_replaced';},
+    (_f,evidence)=>{delete evidence.cardMessages[0].recipientReadback.memberIds;},
+    (_f,evidence)=>{evidence.cardMessages[0].recipientReadback.memberIds=['ou_other'];},
+    (_f,evidence)=>{evidence.cardMessages[0].recipientReadback.kind='read_user';
+      evidence.cardMessages[0].recipientReadback.readUserIds=['ou_other'];
+      evidence.cardMessages[0].recipientReadback.messageId=evidence.cardMessages[0].cardMessageId;},
+    (_f,evidence)=>{evidence.cardMessages[0].recipientReadback.kind='read_user';
+      evidence.cardMessages[0].recipientReadback.readUserIds=[evidence.cardMessages[0].recipientId];},
+  ];
+  for(const change of changes){
+    const f=fixture(),dir=permitTestDirectory('wis-next-day-frozen-proof-'),file=join(dir,'permit.json');
+    const {privateKey}=generateKeyPairSync('ed25519'),at=firstActivationAt;
+    try{
+      const evidence=releaseEvidence(f,at);change(f,evidence);
+      assert.throws(()=>installNextDayReleasePermit(file,{manifest:releaseManifestAt(f,at),
+        evidence,privateKey,clock:()=>at}),/许可清单不一致|独立读回/);
+      assert.equal(existsSync(file),false);
+    }finally{if(existsSync(file))unlinkSync(file);rmdirSync(dir);}
+  }
+});
+
+test('permit signer accepts a complete bot read-user proof for the exact card',()=>{
+  const f=fixture(),dir=permitTestDirectory('wis-next-day-read-user-'),file=join(dir,'permit.json');
+  const {privateKey}=generateKeyPairSync('ed25519'),at=firstActivationAt;
+  try{
+    const evidence=releaseEvidence(f,at),proof=evidence.cardMessages[0].recipientReadback;
+    proof.kind='read_user';proof.messageId=evidence.cardMessages[0].cardMessageId;
+    proof.readUserIds=[evidence.cardMessages[0].recipientId];delete proof.memberIds;
+    const permit=installNextDayReleasePermit(file,{manifest:releaseManifestAt(f,at),
+      evidence,privateKey,clock:()=>at});
+    assert.equal(permit.scopeHash,f.manifest.scopeHash);
+  }finally{if(existsSync(file))unlinkSync(file);rmdirSync(dir);}
 });
 
 test('a slow fsync crossing the first activation cutoff leaves no permit file',()=>{

@@ -17,7 +17,7 @@ const validOpenId=id=>/^ou_[a-z0-9]+$/u.test(id||'');
 const object=value=>value&&typeof value==='object'&&!Array.isArray(value);
 
 export function evaluateNextDayEvidence(evidence,{now=Date.now(),mode='preview',policy}={}){
-  if(!['preview','activation'].includes(mode))throw new Error('Unsupported preflight mode');
+  if(!['preview','activation','renewal'].includes(mode))throw new Error('Unsupported preflight mode');
   // Policy is a separate pinned, operator-reviewed input. Never take an
   // expected container ID, historical ledger hash or authorization from the
   // evidence being evaluated.
@@ -37,6 +37,8 @@ export function evaluateNextDayEvidence(evidence,{now=Date.now(),mode='preview',
     policy.approvedNumbers.length>0,'personnel_scope_not_pinned');
   if(mode==='activation')need(clock>='15:40'&&clock<'15:55'&&today===dateAt(now),
     'outside_first_activation_window');
+  else if(mode==='renewal')need(clock>='15:40'&&clock<'17:00'&&today===dateAt(now),
+    'outside_valid_renewal_window');
   else need(clock<'15:55','first_activation_cutoff_passed');
 
   const env=evidence?.environment||{},services=env.services||{},gateway=env.gateway||{};
