@@ -124,6 +124,17 @@ test('current gateway or writer drift during collection invalidates the snapshot
     policy:{groupId:'group'},now:NOW});
   assert.ok(result.collectorIssues.includes('topology_changed_during_collection'));
 });
+
+test('gateway listener is preserved through whole-round comparison without an implicit port fallback',async()=>{
+  for(const field of ['containerPort','serverName','loopbackPort','missing']){
+    let count=0;const result=await collectReadOnlyEvidence({ops:ops({readTopology:async()=>{
+      const value=topology();value.gateway.listener={containerPort:8080,serverName:'_',loopbackPort:19144};
+      if(++count===2){if(field==='missing')delete value.gateway.listener;
+        else value.gateway.listener[field]=field==='serverName'?'hub.fandow.com':80;}
+      return value;}}),policy:{groupId:'group'},now:NOW});
+    assert.ok(result.collectorIssues.includes('topology_changed_during_collection'));
+  }
+});
 test('even a stopped restart=no same-volume RW container changes the topology gate',async()=>{
   for(const key of ['hub','calendar','dispatch']){
     let calls=0;const result=await collectReadOnlyEvidence({ops:ops({readTopology:async()=>{

@@ -9,17 +9,18 @@ const ROUTES={hub:'/yxb/wis-marketing-hub/',calendar:'/yxb/wis-marketing-hub/mod
 const NOW=Date.parse('2026-09-28T00:45:00Z'),START='2026-09-28T00:44:00.000000000Z';
 const sha=x=>createHash('sha256').update(x).digest('hex'),clone=x=>structuredClone(x);
 const id=n=>String(n).padStart(64,'0'),image=n=>'sha256:'+id(n);
-function fixture(){
+function fixture({containerPort=80,serverName='hub.fandow.com'}={}){
   const pin={network:{id:id(10),name:'formal-network'},gateway:{id:id(1),name:'formal-gateway',image:image(1),
-    configSource:'/srv/config/nginx.conf',configHash:null,loopbackPort:19144},services:{}};
-  const policy={containers:{gateway:{id:id(1),image:image(1)}},dataMounts:{}};
+    configSource:'/srv/config/nginx.conf',configHash:null,loopbackPort:19144,containerPort,serverName},services:{}};
+  const policy={containers:{gateway:{id:id(1),image:image(1)}},dataMounts:{},
+    gatewayListener:{containerPort,serverName,loopbackPort:19144}};
   ROLES.forEach((role,index)=>{const n=index+2;
     pin.services[role]={id:id(n),name:'formal-'+role,image:image(n),alias:'formal-'+role,port:3000+index,
       dataMount:{type:'bind',source:'/srv/'+role+'-data',destination:'/app/data',name:null}};
     policy.containers[role]={id:id(n),image:image(n),startedAt:START};policy.dataMounts[role]='/srv/'+role+'-data';
   });
   Object.assign(policy.containers.hub,{release:'release-r70-test',liveNextDayInstance:'test-boot-0001'});
-  const config=()=>`# configuration file /etc/nginx/nginx.conf:\nworker_processes 1;\nevents {}\nhttp {\nserver { listen 80; server_name hub.fandow.com;\n${ROLES.map(role=>
+  const config=()=>`# configuration file /etc/nginx/nginx.conf:\nworker_processes 1;\nevents {}\nhttp {\nserver { listen ${containerPort}; server_name ${serverName};\n${ROLES.map(role=>
     `location ^~ ${ROUTES[role]} { set $target ${pin.services[role].alias}:${pin.services[role].port}; proxy_pass http://$target; proxy_set_header X-Test "quoted#value"; }`).join('\n')}\n}\n}\n`;
   let nginx=config();pin.gateway.configHash=sha(nginx);policy.gatewayConfigHash=sha(nginx);
   const selected={gateway:pin.gateway,...pin.services};
@@ -30,7 +31,7 @@ function fixture(){
     Mounts:role==='gateway'?[{Type:'bind',Source:p.configSource,Destination:'/etc/nginx/nginx.conf',RW:false}]:
       [{Type:'bind',Source:p.dataMount.source,Destination:'/app/data',RW:true}],
     HostConfig:{Binds:role==='gateway'?[p.configSource+':/etc/nginx/nginx.conf:ro']:[p.dataMount.source+':/app/data:rw'],Mounts:[],VolumesFrom:null,
-      RestartPolicy:{Name:'no'},PortBindings:role==='gateway'?{'80/tcp':[{HostIp:'127.0.0.1',HostPort:String(p.loopbackPort)}]}:{}}}));
+      RestartPolicy:{Name:'no'},PortBindings:role==='gateway'?{[containerPort+'/tcp']:[{HostIp:'127.0.0.1',HostPort:String(p.loopbackPort)}]}:{}}}));
   const network=()=>({Id:pin.network.id,Name:pin.network.name,Containers:Object.fromEntries(containers.filter(c=>c.State.Running&&c.NetworkSettings.Networks[pin.network.name]).map(c=>[c.Id,
     {Name:c.Name.slice(1),IPv4Address:c.NetworkSettings.Networks[pin.network.name].IPAddress+'/16',IPv6Address:'',EndpointID:id(Number(c.Id)+10)}]))});
   const f={pin,policy,containers,commands:[],requests:[],psCount:0,clock:()=>NOW,
@@ -361,4 +362,105 @@ test('kernel observation time is captured before reads rather than refreshed at 
   const f=fixture();let counter=0;f.clock=()=>NOW+counter++;
   const x=await f.reader()();assert.ok(Date.parse(x.services.hub.kernelMountIdentity.checkedAt)<Date.parse(x.observedAt));
   assert.ok(Date.parse(x.services.hub.checkedAt)<=Date.parse(x.services.hub.kernelMountIdentity.checkedAt));
+});
+
+for(const contract of [{containerPort:80,serverName:'hub.fandow.com'},
+  {containerPort:8080,serverName:'_'},{containerPort:8080,serverName:'hub.fandow.com'},
+  {containerPort:1,serverName:'a.example'},{containerPort:65535,serverName:'last.example'}])
+test('explicit independently fixed listener '+contract.containerPort+'/'+contract.serverName+' is observed exactly',async()=>{
+  const f=fixture(contract),x=await f.reader()();
+  assert.deepEqual(x.gateway.listener,{...contract,loopbackPort:19144});
+  assert.deepEqual(x.gateway.listener,f.policy.gatewayListener);
+  for(const r of f.requests)assert.equal(r.options.headers.host,contract.serverName==='_'?'hub.fandow.com':contract.serverName);
+  assert.equal(x.gateway.health,'healthy');assert.equal(x.gateway.dockerHealth,null);
+  assert.equal(f.requests.length,12);assert.ok(f.requests.filter(r=>r.url.includes('127.0.0.1')).every(r=>r.url.startsWith('http://127.0.0.1:19144/')));
+});
+for(const address of ['0.0.0.0:8080','[::]:8080'])test('exact pinned listener allows reviewed address '+address,async()=>{
+  const f=fixture({containerPort:8080,serverName:'_'});f.repinConfig(f.nginx().replace('listen 8080;','listen '+address+';'));
+  assert.deepEqual((await f.reader()()).gateway.listener,f.policy.gatewayListener);
+});
+test('same pinned IPv4/IPv6 listener port does not permit another port',async()=>{
+  const f=fixture({containerPort:8080,serverName:'_'});f.repinConfig(f.nginx().replace('listen 8080;','listen 0.0.0.0:8080; listen [::]:8080;'));
+  assert.deepEqual((await f.reader()()).gateway.listener,f.policy.gatewayListener);
+});
+for(const [label,change,code] of [
+  ['legacy pin missing containerPort',f=>{delete f.pin.gateway.containerPort;},'gateway_pin_invalid'],
+  ['legacy pin missing serverName',f=>{delete f.pin.gateway.serverName;},'gateway_pin_invalid'],
+  ['pin extra fallback port',f=>{f.pin.gateway.fallbackPort=80;},'gateway_pin_invalid'],
+  ['policy listener missing',f=>{delete f.policy.gatewayListener;},'gateway_listener_policy_invalid'],
+  ['policy listener null',f=>{f.policy.gatewayListener=null;},'gateway_listener_policy_invalid'],
+  ['policy listener array',f=>{f.policy.gatewayListener=[];},'gateway_listener_policy_invalid'],
+  ['policy containerPort missing',f=>{delete f.policy.gatewayListener.containerPort;},'gateway_listener_policy_invalid'],
+  ['policy serverName missing',f=>{delete f.policy.gatewayListener.serverName;},'gateway_listener_policy_invalid'],
+  ['policy loopbackPort missing',f=>{delete f.policy.gatewayListener.loopbackPort;},'gateway_listener_policy_invalid'],
+  ['policy extra allow fallback',f=>{f.policy.gatewayListener.fallback=true;},'gateway_listener_policy_invalid'],
+  ['policy containerPort mismatch',f=>{f.policy.gatewayListener.containerPort=80;},'gateway_listener_policy_drift'],
+  ['policy serverName mismatch',f=>{f.policy.gatewayListener.serverName='hub.fandow.com';},'gateway_listener_policy_drift'],
+  ['policy loopbackPort mismatch',f=>{f.policy.gatewayListener.loopbackPort=19145;},'gateway_listener_policy_drift'],
+  ['policy string containerPort',f=>{f.policy.gatewayListener.containerPort='8080';},'gateway_listener_policy_invalid'],
+])test(label+' is refused before any transport',()=>{
+  const f=fixture({containerPort:8080,serverName:'_'});change(f);assert.throws(()=>f.reader(),{code});
+  assert.equal(f.commands.length,0);assert.equal(f.requests.length,0);assert.equal(f.kernelReads.length,0);
+});
+for(const value of [0,-1,65536,1.5,'8080',null,NaN,Infinity])test('invalid pinned container port '+String(value)+' cannot fallback',()=>{
+  const f=fixture();f.pin.gateway.containerPort=value;assert.throws(()=>f.reader(),{code:'gateway_pin_invalid'});assert.equal(f.commands.length,0);
+});
+for(const value of ['','localhost','*.fandow.com','.fandow.com','fandow.com.','~^hub','Hub.fandow.com',
+  'hub.fandow.com other.example','hub.fandow.com\n','hub..example','bad_.example','-bad.example',
+  'bad-.example','a'.repeat(64)+'.example','127.0.0.1','[::1]','https://hub.fandow.com','$(curl evil)','_; return 200'])
+test('unreviewed serverName '+JSON.stringify(value)+' is not a pin',()=>{
+  const f=fixture();f.pin.gateway.serverName=value;assert.throws(()=>f.reader(),{code:'gateway_pin_invalid'});assert.equal(f.commands.length,0);
+});
+for(const value of ['127.1','127.0.1','0177.1','0x7f.1','2130706433','0x7f000001','example.123','a.0177'])
+test('WHATWG IP or numeric-TLD interpretation '+value+' is refused in pin and independent policy',()=>{
+  const f=fixture();f.pin.gateway.serverName=value;f.policy.gatewayListener.serverName=value;
+  assert.throws(()=>f.reader(),{code:'gateway_pin_invalid'});
+  const p=fixture();p.policy.gatewayListener.serverName=value;
+  assert.throws(()=>p.reader(),{code:'gateway_listener_policy_invalid'});
+  for(const row of [f,p]){assert.equal(row.commands.length,0);assert.equal(row.requests.length,0);assert.equal(row.kernelReads.length,0);}
+});
+for(const [label,edit,code] of [
+  ['wrong actual hostname',s=>s.replace('server_name _;','server_name other.example;'),'nginx_host_selection_ambiguous'],
+  ['multiple actual names',s=>s.replace('server_name _;','server_name _ other.example;'),'nginx_host_selection_ambiguous'],
+  ['duplicate actual server_name',s=>s.replace('server_name _;','server_name _; server_name _;'),'nginx_host_selection_ambiguous'],
+  ['wildcard actual name',s=>s.replace('server_name _;','server_name *.example;'),'nginx_host_selection_ambiguous'],
+  ['commented actual name',s=>s.replace('server_name _;','# server_name _;\n'),'nginx_host_selection_ambiguous'],
+  ['old80 actual listener',s=>s.replace('listen 8080;','listen 80;'),'nginx_listener_unsupported'],
+  ['mixed port actual listener',s=>s.replace('listen 8080;','listen 8080; listen 80;'),'nginx_listener_unsupported'],
+  ['nonreviewed address',s=>s.replace('listen 8080;','listen 127.0.0.1:8080;'),'nginx_listener_unsupported'],
+  ['leading zero port',s=>s.replace('listen 8080;','listen 08080;'),'nginx_listener_unsupported'],
+  ['variable port',s=>s.replace('listen 8080;','listen $port;'),'nginx_listener_unsupported'],
+  ['SSL listener',s=>s.replace('listen 8080;','listen 8080 ssl;'),'nginx_listener_unsupported'],
+  ['UDP listener',s=>s.replace('listen 8080;','listen 8080 udp;'),'nginx_listener_unsupported'],
+  ['duplicate equivalent listener',s=>s.replace('listen 8080;','listen 8080; listen 0.0.0.0:8080;'),'nginx_listener_unsupported'],
+  ['missing listener',s=>s.replace('listen 8080;',''),'nginx_listener_unsupported'],
+])test(label+' is rejected even with independently matching exact config bytes',async()=>{
+  const f=fixture({containerPort:8080,serverName:'_'});f.repinConfig(edit(f.nginx()));await rejected(f,code);assert.equal(f.requests.length,0);
+});
+for(const [label,change] of [
+  ['wrong old80 binding',bindings=>{bindings['80/tcp']=bindings['8080/tcp'];delete bindings['8080/tcp'];}],
+  ['extra public TCP',bindings=>{bindings['443/tcp']=[{HostIp:'0.0.0.0',HostPort:'443'}];}],
+  ['extra local TCP',bindings=>{bindings['80/tcp']=[{HostIp:'127.0.0.1',HostPort:'19145'}];}],
+  ['extra published UDP',bindings=>{bindings['8080/udp']=[{HostIp:'127.0.0.1',HostPort:'19144'}];}],
+  ['duplicate designated mapping',bindings=>{bindings['8080/tcp'].push({...bindings['8080/tcp'][0]});}],
+  ['designated public IP',bindings=>{bindings['8080/tcp'][0].HostIp='0.0.0.0';}],
+  ['missing designated mapping',bindings=>{delete bindings['8080/tcp'];}],
+  ['null designated mapping',bindings=>{bindings['8080/tcp']=null;}],
+  ['extra binding-row metadata',bindings=>{bindings['8080/tcp'][0].fallback=true;}],
+  ['noncanonical extra key',bindings=>{bindings['08080/tcp']=null;}],
+  ['invalid extra protocol',bindings=>{bindings['8080/sctp']=null;}],
+])test(label+' cannot hide behind a valid fixed listener',async()=>{
+  const f=fixture({containerPort:8080,serverName:'_'});change(f.containers[0].HostConfig.PortBindings);
+  await rejected(f,'gateway_loopback_binding_drift');assert.equal(f.requests.length,0);
+});
+test('other exposed ports may be explicit null or empty but never published',async()=>{
+  const f=fixture({containerPort:8080,serverName:'_'});Object.assign(f.containers[0].HostConfig.PortBindings,{'80/tcp':null,'8080/udp':[]});
+  assert.deepEqual((await f.reader()()).gateway.listener,f.policy.gatewayListener);
+});
+for(const kind of ['listener','serverName','published'])test('fixed '+kind+' drift during the second observation cannot return a new contract',async()=>{
+  const f=fixture({containerPort:8080,serverName:'_'});
+  f.phaseChange=count=>{if(count!==2)return;
+    if(kind==='published')f.containers[0].HostConfig.PortBindings['8080/tcp'][0].HostPort='19145';
+    else f.repinConfig(f.nginx().replace(kind==='listener'?'listen 8080;':'server_name _;',kind==='listener'?'listen 80;':'server_name other.example;'));};
+  await rejected(f,kind==='published'?'gateway_loopback_binding_drift':'gateway_config_hash_drift');
 });

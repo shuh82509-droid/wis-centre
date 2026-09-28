@@ -16,6 +16,13 @@ const hex=x=>typeof x==='string'&&/^[a-f0-9]{64}$/u.test(x);
 const image=x=>typeof x==='string'&&/^sha256:[a-f0-9]{64}$/u.test(x);
 const name=x=>typeof x==='string'&&/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/u.test(x);
 const alias=x=>typeof x==='string'&&/^[a-z][a-z0-9.-]{2,80}$/u.test(x);
+const port=x=>Number.isInteger(x)&&x>=1&&x<=65535;
+const serverName=x=>{
+  if(x==='_')return true;
+  if(typeof x!=='string'||x.length>253||isIP(x)!==0||x.split('.').length<2||
+    !x.split('.').every(label=>/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(label)))return false;
+  try{const normalized=new URL('http://'+x).hostname;return normalized===x&&isIP(normalized)===0;}catch{return false;}
+};
 const path=x=>typeof x==='string'&&x.startsWith('/')&&x.length>1&&x.length<=1000&&
   !x.endsWith('/')&&!x.includes('//')&&!/[\u0000-\u0020\u007f\\:]/u.test(x)&&
   !x.split('/').some(p=>p==='.'||p==='..');
@@ -73,9 +80,14 @@ function validate(pin,policy){
   need(keys(pin,['network','gateway','services']),'pin_shape_invalid');
   need(keys(pin.network,['id','name'])&&hex(pin.network.id)&&name(pin.network.name),'network_pin_invalid');
   const g=pin.gateway;
-  need(keys(g,['id','name','image','configSource','configHash','loopbackPort'])&&
+  need(keys(g,['id','name','image','configSource','configHash','loopbackPort','containerPort','serverName'])&&
     hex(g.id)&&name(g.name)&&image(g.image)&&path(g.configSource)&&hex(g.configHash)&&
-    Number.isInteger(g.loopbackPort)&&g.loopbackPort>0&&g.loopbackPort<=65535,'gateway_pin_invalid');
+    port(g.loopbackPort)&&port(g.containerPort)&&serverName(g.serverName),'gateway_pin_invalid');
+  const listener=policy?.gatewayListener;
+  need(keys(listener,['containerPort','serverName','loopbackPort'])&&port(listener.containerPort)&&
+    port(listener.loopbackPort)&&serverName(listener.serverName),'gateway_listener_policy_invalid');
+  need(listener.containerPort===g.containerPort&&listener.serverName===g.serverName&&
+    listener.loopbackPort===g.loopbackPort,'gateway_listener_policy_drift');
   need(keys(pin.services,ROLES)&&object(policy?.containers)&&object(policy?.dataMounts), 'service_policy_missing');
   const ids=[g.id],aliases=[],sources=[],volumes=[];
   need(policy.containers.gateway?.id===g.id&&policy.containers.gateway?.image===g.image&&
@@ -139,10 +151,13 @@ function nginxRoutes(config,pin){
   const selected=formal[0].server;
   need(servers.length===1&&same(selected.words,['server'])&&
     selected.children.filter(x=>x.words[0]==='server_name').length===1&&
-    same(selected.children.find(x=>x.words[0]==='server_name').words,['server_name','hub.fandow.com']),'nginx_host_selection_ambiguous');
+    same(selected.children.find(x=>x.words[0]==='server_name').words,['server_name',pin.gateway.serverName]),'nginx_host_selection_ambiguous');
   const listen=selected.children.filter(x=>x.words[0]==='listen');
-  need(listen.length>0&&listen.every(x=>['80','0.0.0.0:80','[::]:80'].includes(x.words[1])&&
-    x.words.slice(2).every(y=>y==='default_server')),'nginx_listener_unsupported');
+  const expectedPort=String(pin.gateway.containerPort),listeners=[expectedPort,'0.0.0.0:'+expectedPort,'[::]:'+expectedPort];
+  need(listen.length>0&&listen.every(x=>!x.children&&listeners.includes(x.words[1])&&x.words.length<=3&&
+    x.words.slice(2).every(y=>y==='default_server'))&&
+    new Set(listen.map(x=>x.words[1]===expectedPort?'0.0.0.0:'+expectedPort:x.words[1])).size===listen.length,
+    'nginx_listener_unsupported');
   // Reject competing exact/prefix/regex routes and nested rewriting. A
   // pinned config with additional routing needs a separately reviewed parser.
   for(const {row,server} of locations){
@@ -262,12 +277,18 @@ function verify(observed,pin,policy,at){
   const gateway=byId.get(pin.gateway.id),configMount=gateway.mounts.filter(m=>m.destination==='/etc/nginx/nginx.conf');
   need(gateway.health===null||gateway.health==='healthy','gateway_docker_health_invalid');
   need(configMount.length>0&&configMount.every(m=>m.type==='bind'&&!m.rw&&m.source===pin.gateway.configSource),'gateway_config_mount_drift');
-  const ports=gateway.portBindings['80/tcp'];
-  need(Array.isArray(ports)&&ports.length===1&&ports[0].HostIp==='127.0.0.1'&&
+  const bindingKey=String(pin.gateway.containerPort)+'/tcp',ports=gateway.portBindings[bindingKey];
+  need(object(gateway.portBindings)&&Object.entries(gateway.portBindings).every(([key,value])=>{
+    const match=/^([1-9]\d{0,4})\/(tcp|udp)$/u.exec(key);
+    return match&&port(Number(match[1]))&&(key===bindingKey||value===null||Array.isArray(value)&&value.length===0);
+  })&&Array.isArray(ports)&&ports.length===1&&
+    keys(ports[0],['HostIp','HostPort'])&&ports[0].HostIp==='127.0.0.1'&&
     ports[0].HostPort===String(pin.gateway.loopbackPort),'gateway_loopback_binding_drift');
   need(digest(config)===pin.gateway.configHash,'gateway_config_hash_drift');
   return {gateway:{id:gateway.id,image:gateway.image,name:pin.gateway.name,status:gateway.status,
     health:null,dockerHealth:gateway.health,routes:nginxRoutes(config,pin),configHash:digest(config),
+    listener:{containerPort:pin.gateway.containerPort,serverName:pin.gateway.serverName,
+      loopbackPort:Number(ports[0].HostPort)},
     checkedAt:new Date(at).toISOString()},services};
 }
 
@@ -422,7 +443,7 @@ export function createDockerTopologyReader({pin,policy,clock=Date.now,execFileIm
       const abort=()=>{controller.abort();void reader?.cancel().catch(()=>{});};external?.addEventListener('abort',abort,{once:true});
       const pending=(async()=>{
         const response=await fetchImpl(url,{method:'GET',redirect:'error',signal:controller.signal,
-          headers:{accept:'application/json',host:'hub.fandow.com'}});
+          headers:{accept:'application/json',host:pin.gateway.serverName==='_'?'hub.fandow.com':pin.gateway.serverName}});
         need(response?.status===200&&response.redirected!==true,'health_http_invalid');
         need(response.headers?.get('content-type')?.toLowerCase().includes('application/json'),'health_content_type_invalid');
         need(response.body&&typeof response.body.getReader==='function','health_body_invalid');

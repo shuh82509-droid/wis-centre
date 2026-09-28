@@ -2,6 +2,7 @@
 // evidence from the *current* gateway, Docker daemon, official workbook and
 // Feishu bot. This module cannot sign a permit, send IM or mutate a store.
 import {createHash} from 'node:crypto';
+import {isIP} from 'node:net';
 
 const ROOMS=['guanqi','brand_selection','youxuan','wangou'];
 const NEXT_DAY_KINDS=new Set(['live_tomorrow','live_tomorrow_group_pending','live_tomorrow_group_confirmed']);
@@ -23,6 +24,16 @@ const nonempty=value=>typeof value==='string'&&value.length>0&&value.length<=200
 const startedAt=(value,now)=>typeof value==='string'&&/^20\d{2}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,9})?Z$/u.test(value)&&
   Number.isFinite(Date.parse(value))&&Date.parse(value)<=now;
 const runtimeIdentity=value=>typeof value==='string'&&/^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/u.test(value)&&value!=='local';
+const canonicalDnsServer=value=>{
+  try { const normalized=new URL('http://'+value).hostname;return normalized===value&&isIP(normalized)===0; }
+  catch { return false; }
+};
+const validListener=value=>object(value)&&same(Object.keys(value).sort(),['containerPort','loopbackPort','serverName'])&&
+  ['containerPort','loopbackPort'].every(key=>Number.isInteger(value[key])&&value[key]>0&&value[key]<=65535)&&
+  typeof value.serverName==='string'&&(value.serverName==='_'||value.serverName.length<=253&&
+    isIP(value.serverName)===0&&value.serverName.split('.').length>=2&&
+    value.serverName.split('.').every(label=>/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(label))&&
+    canonicalDnsServer(value.serverName));
 const OA_CASES=['module','old-action','old-record','personal'];
 
 export function evaluateNextDayEvidence(evidence,{now=Date.now(),mode='preview',policy}={}){
@@ -43,6 +54,7 @@ export function evaluateNextDayEvidence(evidence,{now=Date.now(),mode='preview',
     /^sha256:[a-f0-9]{64}$/u.test(policy.containers[k]?.image||'')),'container_baseline_not_pinned');
   need(object(policy?.dataMounts)&&['hub','calendar','dispatch'].every(k=>
     safeMount(policy.dataMounts[k])),'data_mount_baseline_not_pinned');
+  need(validListener(policy?.gatewayListener),'gateway_listener_policy_not_pinned');
   need(['hub','calendar','dispatch'].every(k=>startedAt(policy?.containers?.[k]?.startedAt,now))&&
     runtimeIdentity(policy?.containers?.hub?.release)&&
     runtimeIdentity(policy?.containers?.hub?.liveNextDayInstance),'runtime_instance_baseline_not_pinned');
@@ -83,6 +95,9 @@ export function evaluateNextDayEvidence(evidence,{now=Date.now(),mode='preview',
     gateway?.routes?.dispatch===services.dispatch?.id&&
     gateway?.configHash===policy?.gatewayConfigHash&&
     /^[a-f0-9]{64}$/u.test(policy?.gatewayConfigHash||''),'gateway_route_or_config_drift');
+  need(validListener(gateway.listener)&&validListener(policy?.gatewayListener)&&
+    ['containerPort','serverName','loopbackPort'].every(key=>gateway.listener[key]===policy.gatewayListener[key]),
+  'gateway_listener_drift');
   for(const key of ['hub','calendar','dispatch']){
     const x=services[key];
     need(Array.isArray(x?.runningRwWriters)&&same(x.runningRwWriters,[x.id])&&

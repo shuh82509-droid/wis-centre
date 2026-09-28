@@ -19,7 +19,7 @@ export const topologyIdentityProjection=x=>{
     kernelMountIdentity:s.kernelMountIdentity&&Object.fromEntries(
       Object.entries(s.kernelMountIdentity).filter(([key])=>key!=='checkedAt'))};};
   return {gateway:{id:g.id,image:g.image,status:g.status,health:g.health,
-    routes:g.routes,configHash:g.configHash},
+    routes:g.routes,configHash:g.configHash,listener:g.listener},
     services:Object.fromEntries(['hub','calendar','dispatch'].map(k=>[k,service(k)]))};
 };
 const keyTopology=x=>sha(topologyIdentityProjection(x));

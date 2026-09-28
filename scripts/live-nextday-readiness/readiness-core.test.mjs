@@ -52,7 +52,8 @@ function fixture(){
     containers:{gateway:{id:cid('a'),image:image('1')},hub:{id:cid('b'),image:image('2'),startedAt:CURRENT_STARTED,
       release:'hub-synthetic-release',liveNextDayInstance:'boot-synthetic-instance'},
       calendar:{id:cid('c'),image:image('3'),startedAt:CURRENT_STARTED},dispatch:{id:cid('d'),image:image('4'),startedAt:CURRENT_STARTED}},
-    gatewayConfigHash:cid('e'),historicalUnknownHash:sha([]),
+    gatewayConfigHash:cid('e'),gatewayListener:{containerPort:8080,serverName:'_',loopbackPort:19144},
+    historicalUnknownHash:sha([]),
     dataMounts:{hub:'/data/hub',calendar:'/data/calendar',dispatch:'/data/dispatch'},
     approvedNumbers:ROOM_CODES.flatMap((_,i)=>[`N${i}a`,`N${i}b`])};
   policy.backupSources=Object.fromEntries(['hub','calendar','dispatch'].map(key=>[key,{
@@ -86,7 +87,7 @@ function fixture(){
       complete:true,memberIds:[byNumber.get(n.recipient).openId]}}));
   const evidence={collectorIssues:[],environment:{gateway:{id:policy.containers.gateway.id,
     image:policy.containers.gateway.image,status:'running',health:'healthy',checkedAt:ISO,
-    configHash:policy.gatewayConfigHash,routes:{hub:policy.containers.hub.id,
+    configHash:policy.gatewayConfigHash,listener:clone(policy.gatewayListener),routes:{hub:policy.containers.hub.id,
       calendar:policy.containers.calendar.id,dispatch:policy.containers.dispatch.id}},
     services:{hub:service('hub'),calendar:service('calendar'),dispatch:service('dispatch')},
     backup:backupFixture(policy,ISO),
@@ -111,6 +112,52 @@ const rejects=(change,issue,mode='activation')=>{
 test('complete synthetic evidence only passes diagnostics and can never authorize a release',()=>{
   const r=run(fixture());assert.equal(r.checksPassed,true);assert.equal(r.safeToEnable,false);
   assert.equal(r.diagnosticOnly,true);assert.equal(r.expectedShifts,4);assert.equal(r.expectedCards,8);
+});
+
+test('gateway listener is independently pinned, never inferred from actual evidence',()=>{
+  for(const value of [undefined,null,{},'8080',
+    {containerPort:8080,serverName:'_',loopbackPort:'19144'},
+    {containerPort:0,serverName:'_',loopbackPort:19144},
+    {containerPort:65536,serverName:'_',loopbackPort:19144},
+    {containerPort:8080.5,serverName:'_',loopbackPort:19144},
+    {containerPort:8080,serverName:'*.fandow.com',loopbackPort:19144},
+    {containerPort:8080,serverName:'~.*',loopbackPort:19144},
+    {containerPort:8080,serverName:'hub.fandow.com _',loopbackPort:19144},
+    {containerPort:8080,serverName:'localhost',loopbackPort:19144},
+    {containerPort:8080,serverName:'127.0.0.1',loopbackPort:19144},
+    {containerPort:8080,serverName:'Hub.fandow.com',loopbackPort:19144},
+    {containerPort:8080,serverName:'hub.fandow.com.',loopbackPort:19144},
+    {containerPort:8080,serverName:'_',loopbackPort:19144,approved:true}]){
+    const f=fixture();f.policy.gatewayListener=value;
+    const result=run(f);assert.ok(result.issues.includes('gateway_listener_policy_not_pinned'));
+    assert.ok(result.issues.includes('gateway_listener_drift'));assert.equal(result.safeToEnable,false);
+  }
+});
+
+test('gateway listener readback must match exact independent container port, name and loopback port',()=>{
+  for(const field of ['containerPort','serverName','loopbackPort'])
+    rejects(f=>{f.evidence.environment.gateway.listener[field]=field==='serverName'?'hub.fandow.com':80;},
+      'gateway_listener_drift');
+  for(const value of [undefined,null,{containerPort:8080,serverName:'_',loopbackPort:19144,unexpected:true}])
+    rejects(f=>{f.evidence.environment.gateway.listener=value;},'gateway_listener_drift');
+});
+
+test('matching policy and evidence cannot disguise URL-normalized numeric hosts as DNS',()=>{
+  for(const serverName of ['127.1','127.0.1','0177.1','0x7f.1','2130706433','0x7f000001','123.456','foo.1']){
+    const f=fixture();f.policy.gatewayListener.serverName=serverName;
+    f.evidence.environment.gateway.listener=clone(f.policy.gatewayListener);
+    const result=run(f);assert.equal(result.checksPassed,false,serverName);
+    assert.ok(result.issues.includes('gateway_listener_policy_not_pinned'),serverName);
+    assert.ok(result.issues.includes('gateway_listener_drift'),serverName);
+    assert.equal(result.safeToEnable,false);
+  }
+});
+
+test('an explicit legacy 80/DNS contract is evaluated exactly and never silently defaulted',()=>{
+  const f=fixture();f.policy.gatewayListener={containerPort:80,serverName:'hub.fandow.com',loopbackPort:19144};
+  assert.ok(run(f).issues.includes('gateway_listener_drift'));
+  f.evidence.environment.gateway.listener=clone(f.policy.gatewayListener);
+  assert.equal(run(f).checksPassed,true);assert.equal(run(f).safeToEnable,false);
 });
 test('date rolls forward dynamically and expired first activation cannot be backfilled',()=>{
   const f=fixture();assert.ok(run(f,'activation',Date.parse('2026-09-27T07:55:00.000Z'))
