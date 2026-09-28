@@ -7,7 +7,8 @@ import {WorkflowStore} from '/app/workflow-store.mjs';
 import {createOpeningSender} from '/app/opening-notifications.mjs';
 import {clone,message,plan,MemoryStore,laneFixture,legacyRow} from './fixture-support.mjs';
 
-const times=['16:00:00','23:59:00'];
+// Preserve the original 86 protocol cases at two valid times; late-window rejection is separate.
+const times=['16:00:00','16:30:00'];
 const current=readFileSync('/app/server.mjs');
 test('frozen hard-OFF server and original actual source are preserved',()=>{
  assert.equal(createHash('sha256').update(current).digest('hex'),'af21b94baa29c3f245c2ee892b4ff273347645798eb2f4c9500c4419518ee4cd');
@@ -93,7 +94,7 @@ test('known no-POST sender does not accept missing durable intent callback',asyn
  let posts=0;const sender=createOpeningSender({enabled:true,appId:'cli_aa9c744d6ffa1cc4',tenantToken:async()=> 'synthetic-token',fetch:async()=>{posts++;}});const result=await sender(message(),'fixture-uuid',async()=>true);assert.equal(posts,0);assert.equal(result.unknown,false);assert.equal(result.postAttempted,false);
 });
 test('source delay across midnight cannot send the stale original day',async()=>{
- const fixture=laneFixture({now:Date.parse('2026-09-28T23:59:00+08:00'),token:clock=>{clock.now+=120000;return 'synthetic-token';}});await fixture.lane.tick();assert.equal(fixture.counts.posts,0);assert.equal(fixture.store.state.openingReceipts[0].unknown,false);
+ const fixture=laneFixture({now:Date.parse('2026-09-28T16:30:00+08:00'),token:clock=>{clock.now+=8*3600000;return 'synthetic-token';}});await fixture.lane.tick();assert.equal(fixture.counts.posts,0);assert.equal(fixture.store.state.openingReceipts[0].unknown,false);
 });
 test('missing legacy scope identity and invalid success IDs fail closed without changing old rows',async()=>{
  for(const row of [{state:'unknown',unknown:true},{...legacyRow(message()),state:'sent',unknown:false,messageId:{unverified:'not a string'}}]){

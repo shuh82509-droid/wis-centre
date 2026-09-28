@@ -71,24 +71,11 @@ function messageRequest(message,uuid){
 export class OpeningNotifications{
  constructor({store,readSchedule,participants,send,clock=Date.now,enabled=false,sendHour=16,maxPerTick=3,enabledRooms=['brand_selection','youxuan','wangou']}){
   Object.assign(this,{store,readSchedule,participants,send,clock,enabled,sendHour,maxPerTick,enabledRooms});this.running=false;this.nextAt=0;this.storageBlocked=false;
-  this.clockBlocked=false;this.lastClock=null;
- }
- checkedClock(){
-  try{
-   const now=this.clock();
-   // Only observed, valid, monotonically nondecreasing millisecond clocks are usable.
-   if(this.clockBlocked||!Number.isSafeInteger(now)||Math.abs(now)>8640000000000000-32*3600000||this.lastClock!==null&&now<this.lastClock)throw Error('Opening clock cannot be verified');
-   this.lastClock=now;return now;
-  }catch{this.clockBlocked=true;throw Error('Opening clock is invalid or moved backwards; automatic sending stopped');}
- }
- inSendWindow(now,date){
-  // A configured hour must not widen or move the fixed Shanghai [16:00,17:00) window.
-  return !this.clockBlocked&&this.sendHour===16&&hour(now)===16&&(!date||day(now+86400000)===date);
  }
  async plan(){
-  const now=this.checkedClock(),date=day(now+86400000),raw=await this.readSchedule(null,date,{fresh:true});
+  const now=this.clock(),date=day(now+86400000),raw=await this.readSchedule(null,date,{fresh:true});
   const disabledRooms=(raw.rooms||[]).filter(r=>!this.enabledRooms.includes(r.code)).map(r=>({roomCode:r.code,room:r.name,reason:'暂未启用'}));
-  return {...buildOpeningPlan({...raw,rooms:(raw.rooms||[]).filter(r=>this.enabledRooms.includes(r.code))},date,this.participants(),this.checkedClock()),disabledRooms};
+  return {...buildOpeningPlan({...raw,rooms:(raw.rooms||[]).filter(r=>this.enabledRooms.includes(r.code))},date,this.participants(),this.clock()),disabledRooms};
  }
  persist(mutate){
   try{const value=this.store.transaction(mutate);if(value?.then)throw Error('Opening transaction must be synchronous');return value;}
@@ -99,16 +86,15 @@ export class OpeningNotifications{
   catch{this.storageBlocked=true;throw Error('Opening commit readback is unverified; automatic sending stopped');}
  }
  async tick(){
-  if(!this.enabled||this.storageBlocked||this.clockBlocked||this.running)return;
-  let started;try{started=this.checkedClock();if(started<this.nextAt||!this.inSendWindow(started))return;}catch{return;}
-  this.running=true;this.nextAt=started+60000;
+  if(!this.enabled||this.storageBlocked||this.running||this.clock()<this.nextAt)return;
+  this.running=true;this.nextAt=this.clock()+60000;
   try{
-   const plan=await this.plan(),now=this.checkedClock(),due=this.inSendWindow(now,plan.date);
+   const plan=await this.plan(),now=this.clock(),due=hour(now)>=this.sendHour;
    this.persist(s=>{receipts(s);s.openingStatus={checkedAt:new Date(now).toISOString(),date:plan.date,state:due?'active':'waiting',sendHour:this.sendHour,rooms:plan.rooms,issues:plan.issues,disabledRooms:plan.disabledRooms};s.openingReceipts||=[]});
    if(!due)return;
    let sent=0;
    for(const message of plan.messages){
-    if(sent>=this.maxPerTick||!this.inSendWindow(this.checkedClock(),message.date))break;
+    if(sent>=this.maxPerTick)break;
     const expectedRequest=messageRequest(message,message.key.slice(0,32));
     const lease=this.persist(s=>{
      const rows=receipts(s);
@@ -116,10 +102,9 @@ export class OpeningNotifications{
      // No automatic retry, including expired legacy leases or a changed body key.
      if(rows.some(r=>r.key===message.key||unresolved(r)&&sameScope(r,message)))return null;
      if(message.kind==='group'&&(!Array.isArray(message.requires)||!message.requires.every(key=>rows.some(r=>r.key===key&&groupDependencyProved(r)))))return null;
-     const preparedNow=this.checkedClock();if(!this.inSendWindow(preparedNow,message.date))return null;
      // The scope hold is never auto-cleared, even after a success/result commit.
      // Releasing it needs an independently reviewed message/source readback protocol.
-     const row={key:message.key,date:message.date,room:message.room,roomCode:message.roomCode,kind:message.kind,recipientId:message.recipient.id,recipientName:message.recipient.name,firstAttemptAt:new Date(preparedNow).toISOString(),uuid:message.key.slice(0,32),requestHash:expectedRequest.hash,autoHold:true,attempts:0,state:'prepared',preparedAt:new Date(preparedNow).toISOString(),lease:randomUUID(),unknown:false,postAttempted:false};
+     const row={key:message.key,date:message.date,room:message.room,roomCode:message.roomCode,kind:message.kind,recipientId:message.recipient.id,recipientName:message.recipient.name,firstAttemptAt:new Date(this.clock()).toISOString(),uuid:message.key.slice(0,32),requestHash:expectedRequest.hash,autoHold:true,attempts:0,state:'prepared',preparedAt:new Date(this.clock()).toISOString(),lease:randomUUID(),unknown:false,postAttempted:false};
      s.openingReceipts.push(row);
      return {...row};
     });
@@ -128,19 +113,19 @@ export class OpeningNotifications{
     let result,invocationGate,gateOpened=false,senderInvoked=false;
     try{
      // Never send yesterday's queue or a now-stale personnel assignment.
-     const fresh=await this.plan(),freshNow=this.checkedClock();
-     if(!this.inSendWindow(freshNow,message.date)||fresh.date!==message.date||!fresh.messages.some(x=>x.key===message.key))result=notPosted('发送前时窗、班表或身份无法核验，本条未发送');
+     const fresh=await this.plan();
+     if(fresh.date!==message.date||!fresh.messages.some(x=>x.key===message.key))result=notPosted('发送前班表已变化或身份无法核验，本条未发送');
      else {senderInvoked=true;result=await this.send(message,lease.uuid,async()=>{
       const latest=await this.plan(),row=this.store.read().openingReceipts.find(x=>x.key===message.key);
-      return this.inSendWindow(this.checkedClock(),message.date)&&row?.state==='prepared'&&row.lease===lease.lease&&latest.date===message.date&&latest.messages.some(x=>x.key===message.key);
+      return row?.state==='prepared'&&row.lease===lease.lease&&latest.date===message.date&&latest.messages.some(x=>x.key===message.key);
      },invocationGate=async actualRequestHash=>{
       const latest=await this.plan();
-      const sourceCheckedAt=this.checkedClock();
-      if(!this.inSendWindow(sourceCheckedAt,message.date)||actualRequestHash!==expectedRequest.hash||latest.date!==message.date||!latest.messages.some(x=>x.key===message.key&&messageRequest(x,lease.uuid).hash===expectedRequest.hash))return null;
+      const sourceCheckedAt=this.clock();
+      if(actualRequestHash!==expectedRequest.hash||latest.date!==message.date||!latest.messages.some(x=>x.key===message.key&&messageRequest(x,lease.uuid).hash===expectedRequest.hash)||day(this.clock()+86400000)!==message.date||hour(this.clock())<this.sendHour)return null;
       const intentAt=new Date(sourceCheckedAt).toISOString();
       const committed=this.persist(s=>{
        const rows=receipts(s),row=rows.find(r=>r.key===message.key);
-       if(!this.inSendWindow(this.checkedClock(),message.date)||row?.state!=='prepared'||row.lease!==lease.lease||rows.some(r=>r!==row&&unresolved(r)&&sameScope(r,message)))return false;
+       if(row?.state!=='prepared'||row.lease!==lease.lease||rows.some(r=>r!==row&&unresolved(r)&&sameScope(r,message)))return false;
        // Intent is a risk hold, not evidence that fetch/POST was invoked.
        row.state='sending';row.unknown=false;row.postAttempted=null;row.postIntentAt=intentAt;row.attempts++;
        return true;
@@ -152,8 +137,8 @@ export class OpeningNotifications{
       return finalRequestHash=>{
        if(this.storageBlocked||finalRequestHash!==expectedRequest.hash||messageRequest(message,lease.uuid).hash!==expectedRequest.hash)return false;
        this.confirm(ownsIntent);
-       const finalNow=this.checkedClock();
-       if(!this.inSendWindow(finalNow,message.date)||finalNow<sourceCheckedAt||finalNow-sourceCheckedAt>1000)return false;
+       const finalNow=this.clock();
+       if(!Number.isFinite(finalNow)||finalNow<sourceCheckedAt||finalNow-sourceCheckedAt>1000||day(finalNow+86400000)!==message.date||hour(finalNow)<this.sendHour)return false;
        gateOpened=true;return true;
       };
      });}
@@ -168,7 +153,7 @@ export class OpeningNotifications{
      receipts(s);
      const row=s.openingReceipts.find(r=>r.key===message.key);if(row?.lease!==lease.lease)return;
      row.state=outcome.state;row.reason=outcome.reason||'';row.unknown=outcome.unknown;row.postAttempted=outcome.postAttempted;
-     if(accepted){row.messageId=outcome.messageId;row.sentAt=new Date(this.checkedClock()).toISOString()}
+     if(accepted){row.messageId=outcome.messageId;row.sentAt=new Date(this.clock()).toISOString()}
      if(!outcome.unknown)delete row.lease;
      return true;
     });
@@ -176,7 +161,7 @@ export class OpeningNotifications{
     this.confirm(rows=>rows.some(r=>r.key===lease.key&&r.state===outcome.state&&r.unknown===outcome.unknown&&r.postAttempted===outcome.postAttempted&&(!accepted||r.messageId===outcome.messageId)));
     sent++;
    }
-  }catch{if(!this.storageBlocked&&!this.clockBlocked){try{const now=this.checkedClock();this.persist(s=>{s.openingStatus={date:day(now+86400000),checkedAt:new Date(now).toISOString(),state:'attention',issues:[{message:'次日班表或发送证据无法核验，本轮未继续发送'}]}})}catch{}}}
+  }catch{if(!this.storageBlocked){try{this.persist(s=>{s.openingStatus={date:day(this.clock()+86400000),checkedAt:new Date(this.clock()).toISOString(),state:'attention',issues:[{message:'次日班表或发送证据无法核验，本轮未继续发送'}]}})}catch{}}}
   finally{this.running=false}
  }
 }
