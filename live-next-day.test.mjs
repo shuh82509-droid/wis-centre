@@ -114,7 +114,10 @@ const releaseReadiness=(f,checkedAt,syntheticTimeline={})=>{
         release:f.manifest.releaseId,liveNextDayInstance:f.manifest.bootId},
       calendar:{id:cid('c'),image:'sha256:'+cid('3'),startedAt:currentStarted},
       dispatch:{id:cid('d'),image:'sha256:'+cid('4'),startedAt:currentStarted}},
-    gatewayConfigHash:cid('e'),historicalUnknownHash:sha([]),
+    // Explicit synthetic listener approval, never inferred from readback or
+    // treated as a current production port/server-name observation.
+    gatewayConfigHash:cid('e'),gatewayListener:{containerPort:8080,serverName:'_',loopbackPort:19144},
+    historicalUnknownHash:sha([]),
     dataMounts:{hub:'/data/hub',calendar:'/data/calendar',dispatch:'/data/dispatch'},
     approvedNumbers:['A','B']};
   policy.backupSources=Object.fromEntries(['hub','calendar','dispatch'].map(key=>[key,{
@@ -144,6 +147,7 @@ const releaseReadiness=(f,checkedAt,syntheticTimeline={})=>{
   return {policy,evidence:{collectorIssues:[],environment:{gateway:{
     id:policy.containers.gateway.id,image:policy.containers.gateway.image,
     status:'running',health:'healthy',checkedAt:iso,configHash:policy.gatewayConfigHash,
+    listener:{containerPort:8080,serverName:'_',loopbackPort:19144},
     routes:{hub:policy.containers.hub.id,calendar:policy.containers.calendar.id,
       dispatch:policy.containers.dispatch.id}},services:{hub:service('hub'),
       calendar:service('calendar'),dispatch:service('dispatch')},
@@ -435,6 +439,42 @@ test('release-only or boot-only policy/typed Hub drift cannot sign a different m
       if(renewal)assert.equal(readFileSync(file,'utf8'),original);
       else assert.equal(existsSync(file),false);
       assert.deepEqual(readdirSync(dir),renewal?['permit.json']:[]);
+    }finally{if(existsSync(file))unlinkSync(file);rmdirSync(dir);}
+  }
+});
+
+test('permit signer rejects missing, extra or drifted exact gateway listener during activation and renewal',()=>{
+  const mutations=[
+    ['missing-policy','gateway_listener_policy_not_pinned',(policy)=>{delete policy.gatewayListener;}],
+    ['missing-readback','gateway_listener_drift',(_policy,readback)=>{delete readback.environment.gateway.listener;}],
+    ['extra-policy','gateway_listener_policy_not_pinned',policy=>{policy.gatewayListener.unreviewed=true;}],
+    ['extra-readback','gateway_listener_drift',(_policy,readback)=>{readback.environment.gateway.listener.unreviewed=true;}],
+    ['policy-port-drift','gateway_listener_drift',policy=>{policy.gatewayListener.containerPort=80;}],
+    ['readback-port-drift','gateway_listener_drift',(_policy,readback)=>{readback.environment.gateway.listener.containerPort=80;}],
+    ['server-name-drift','gateway_listener_drift',(_policy,readback)=>{readback.environment.gateway.listener.serverName='hub.fandow.com';}],
+    ['loopback-port-drift','gateway_listener_drift',(_policy,readback)=>{readback.environment.gateway.listener.loopbackPort=19145;}],
+  ];
+  for(const renewal of [false,true])for(const [name,issue,mutate] of mutations){
+    const f=fixture(),dir=permitTestDirectory('wis-next-day-exact-listener-'),file=join(dir,'permit.json');
+    const {privateKey}=generateKeyPairSync('ed25519'),at=renewal?firstActivationAt+60000:firstActivationAt;
+    let original=null;
+    try{
+      if(renewal){
+        installNextDayReleasePermit(file,{...releasePolicyOptions(f),manifest:releaseManifestAt(f,firstActivationAt),
+          evidence:releaseEvidence(f,firstActivationAt),privateKey,clock:()=>firstActivationAt});
+        original=readFileSync(file,'utf8');
+      }
+      const evidence=releaseEvidence(f,at),policy=structuredClone(releasePolicyOptions(f).readinessPolicy);
+      const readback=evidence.readiness.evidence,mode=renewal?'renewal':'activation';
+      assert.equal(evaluateNextDayEvidence(readback,{now:at,mode,policy}).checksPassed,true,name+' baseline');
+      mutate(policy,readback);
+      const result=evaluateNextDayEvidence(readback,{now:at,mode,policy});
+      assert.equal(result.checksPassed,false,name);assert.ok(result.issues.includes(issue),name+' precise listener rejection');
+      assert.throws(()=>installNextDayReleasePermit(file,{readinessPolicy:policy,externallyPinnedPolicyHash:sha(policy),
+        manifest:releaseManifestAt(f,at),evidence,privateKey,clock:()=>at}),/完整独立预检/,name);
+      if(renewal)assert.equal(readFileSync(file,'utf8'),original,name+' preserves old permit');
+      else assert.equal(existsSync(file),false,name+' never creates permit');
+      assert.deepEqual(readdirSync(dir),renewal?['permit.json']:[],name+' cleans lock/temp');
     }finally{if(existsSync(file))unlinkSync(file);rmdirSync(dir);}
   }
 });
@@ -1435,4 +1475,144 @@ test('success response without message ID is unknown and cannot retry any next-d
     assert.throws(()=>sender.retry({user:{number:'A'},canManage:true},target.id),
       /发送结果不明.*禁止重发/,kind);
   }
+});
+
+// A real WorkflowStore transaction does its write/fsync/rename AFTER the
+// callback. These memory-only fixtures model that interval without writing a
+// permit, invoking native transport, or pretending to produce live evidence.
+async function nextDayCommitBoundary({kind='live_tomorrow',future=false,fault='stable'}={}){
+  const f=fixture();f.data.tasks.forEach(task=>task.workflow='04');await f.job.tick();
+  if(kind!=='live_tomorrow'){
+    f.data.flowNotifications.filter(n=>n.kind==='live_tomorrow').forEach((n,i)=>{n.state='sent';n.messageId=`om_direct_${i}`;});
+    if(kind==='live_tomorrow_group_confirmed')f.nodes.forEach(n=>n.liveAcknowledgements=[{
+      kind:'live_ack',attempt:n.attempt,by:n.owner.number,at:new Date(f.now()).toISOString()}]);
+    f.advance();await f.job.tick();
+  }
+  const target=f.data.flowNotifications.find(n=>n.kind===kind);assert.ok(target);
+  for(const row of f.data.flowNotifications)if(row!==target&&row.state==='ready')row.state='superseded';
+  let activePermit=f.permit;f.job.readReleasePermit=()=>activePermit;
+  if(['window','permit-read-window','final-business-scan-window','final-business-scan-stable'].includes(fault)){
+    f.setNow('2026-09-24T16:59:59+08:00');f.permit.issuedAt='2026-09-24T08:45:00.000Z';f.permit.expiresAt='2026-09-24T09:00:00.000Z';
+  }else if(['expiry','permit-read-expiry'].includes(fault)){
+    f.setNow('2026-09-24T16:29:59+08:00');f.permit.issuedAt='2026-09-24T08:00:00.000Z';f.permit.expiresAt='2026-09-24T08:30:00.000Z';
+  }
+  let passedLastGate=false;
+  const posts=[],sender=new FlowFeishu(f.job.runtime.store,{people:f.job.runtime.people,clock:f.now,...permitOptions(f),
+    env:{FLOW_NOTIFICATIONS_ENABLED:'true',FLOW_LIVE_FUTURE_EVIDENCE_ENABLED:String(future),
+      FEISHU_APP_ID:'test',FEISHU_APP_SECRET:'test',FEISHU_RECIPIENT_MAP_JSON:JSON.stringify({A:'ou_anchor',B:'ou_assistant'}),
+      FLOW_LIVE_WAR_ROOM_CHAT_ID:'oc_3f92ef62d6160399ee823e74def199e6'},
+    verifyLiveNoticeSource:async(notice,options)=>{
+      const proof=await currentOfficialNextDaySource(notice,{runtime:f.job.runtime,
+      liveSessions:f.job.liveSessions,notifier:f.job.notifier,readReleasePermit:f.job.readReleasePermit,
+      releaseId:f.job.releaseId,bootId:f.job.bootId,clock:f.now,withEvidence:options?.withEvidence===true});
+      if(fault==='source-age'&&options?.withEvidence&&proof?.verified)proof.checkedAt=new Date(f.now()-44000).toISOString();
+      return proof;
+    },
+    fetchImpl:async(_url,options)=>{
+      if(options.method==='POST'){
+        assert.equal(passedLastGate,true,'POST must immediately follow the last read-only gate');passedLastGate=false;
+        posts.push({at:f.now(),body:options.body});
+        if(fault==='post-timeout')throw Error('synthetic invoked POST result unknown');
+        return Response.json({code:0,data:{message_id:'om_mock',chat_id:'oc_mock'}});
+      }
+      return Response.json({code:1});}});
+  const lastGate=sender.nextDayPostState.bind(sender);
+  sender.nextDayPostState=(...args)=>{const result=lastGate(...args);if(result.valid)passedLastGate=true;return result;};
+  sender.tenantToken=async()=> 'token';
+  if(future)sender.liveCards={has:n=>['A','B'].includes(n),handles:()=>true,ready:()=>true,
+    recipient:n=>f.job.notifier.recipient(n),participants:{recipient:n=>f.job.notifier.recipient(n),
+      verified:n=>({appId:'test',number:n,openId:f.job.notifier.recipient(n).id,checkedAt:f.now()-(fault==='binding-age'?899000:0)}),
+      actor:({task,nodeId,openId})=>({user:{number:openId==='ou_anchor'?'A':'B'},taskId:task.id,nodeId,channel:'feishu-live'})}};
+  const read=f.job.runtime.store.read;f.job.runtime.store.read=()=>{
+    assert.equal(passedLastGate,false,'no store read may intervene between successful last gate and POST');return read();};
+  const original=f.job.runtime.store.transaction;let committed=false,finalBusinessScans=0;
+  f.job.runtime.store.transaction=fn=>{
+    assert.equal(passedLastGate,false,'no durable transaction may intervene between successful last gate and POST');
+    // Real WorkflowStore returns a detached result, not a live reference to
+    // the durable row another writer may change during persistence.
+    const result=structuredClone(original(fn));
+    if(!committed&&(future?result?.receiveIdType==='open_id'&&typeof result?.body==='string':result?.valid===true&&result.uncertain===false)){
+      committed=true;
+      if(fault==='window')f.setNow('2026-09-24T17:00:01+08:00');
+      if(fault==='expiry')f.setNow('2026-09-24T16:30:01+08:00');
+      if(fault==='off')activePermit=null;
+      if(fault==='unknown')target.unknown=true;
+      if(fault==='lease-expired')f.setNow(new Date(f.now()+46000).toISOString());
+      if(fault==='lease-missing')delete target.leaseUntil;
+      if(fault==='lease-changed')target.leaseId='different-current-lease';
+      if(fault==='owner')f.nodes.find(n=>n.id===(target.nodeId||target.related[0].nodeId)).owner.number='OTHER';
+      if(fault==='attempt')f.nodes.find(n=>n.id===(target.nodeId||target.related[0].nodeId)).attempt++;
+      if(fault==='recipient'){
+        if(kind!=='live_tomorrow')sender.warRoomChatId='oc_other';
+        else if(!future)sender.map[target.recipient]='ou_other';
+        else{const previous=f.job.notifier.recipient;f.job.notifier.recipient=n=>n===target.recipient?{id:'ou_other',type:'open_id'}:previous(n);}
+      }
+      if(fault==='delivery')target.delivery.content=JSON.stringify({text:'changed after durable commit'});
+      if(fault==='permit-read-error')sender.readNextDayPermit=()=>{throw Error('synthetic final permit read failure');};
+      if(fault==='store-read-error'){
+        const read=f.job.runtime.store.read;let unreadable=true;
+        f.job.runtime.store.read=()=>{if(unreadable){unreadable=false;throw Error('synthetic final store read failure');}return read();};
+      }
+      if(['permit-read-window','permit-read-expiry'].includes(fault))sender.readNextDayPermit=()=>{
+        f.setNow(fault==='permit-read-window'?'2026-09-24T17:00:01+08:00':'2026-09-24T16:30:01+08:00');return activePermit;
+      };
+      if(['final-business-scan-window','final-business-scan-stable'].includes(fault)){
+        const beforeScan=f.job.runtime.store.read;
+        f.job.runtime.store.read=()=>{
+          const snapshot=beforeScan();let finds=0;
+          snapshot.tasks.find=(...args)=>{
+            const row=Array.prototype.find.apply(snapshot.tasks,args);
+            // The first lookup resolves this notice's task. The second is
+            // inside the final group business scan, after its now argument.
+            if(++finds===2){finalBusinessScans++;
+              if(fault==='final-business-scan-window')f.setNow('2026-09-24T17:00:01+08:00');}
+            return row;
+          };
+          return snapshot;
+        };
+      }
+      if(['source-age','binding-age'].includes(fault))f.setNow(new Date(f.now()+2000).toISOString());
+      if(fault==='binding')sender.liveCards.participants.verified=n=>({appId:'other-app',number:n,openId:'ou_other',checkedAt:f.now()});
+      if(fault==='prepared-request')result.request.content=JSON.stringify({text:'not the exact prepared body'});
+      if(fault==='request-hash')target.futureEvidence.requestHash='0'.repeat(64);
+      if(fault==='content-hash')target.futureEvidence.contentHash='0'.repeat(64);
+      if(fault==='evidence-recipient')target.futureEvidence.receiveId='ou_other';
+      if(fault==='evidence-source')target.futureEvidence.sourceRevision++;
+    }
+    return result;
+  };
+  await sender.flush();assert.equal(committed,true,'fixture must first pass the callback gate and cross the durable-commit boundary');
+  if(fault.startsWith('final-business-scan-'))assert.ok(finalBusinessScans>0,'fixture must enter the final group business scan');
+  return {f,sender,target,posts};
+}
+for(const [kind,future] of [['live_tomorrow',false],['live_tomorrow_group_pending',false],
+  ['live_tomorrow_group_confirmed',false],['live_tomorrow',true]])
+for(const fault of ['stable','post-timeout','window','expiry','off','unknown','lease-expired','lease-missing','lease-changed',
+  'owner','attempt','recipient','delivery','permit-read-error','store-read-error','permit-read-window','permit-read-expiry',
+  ...(kind!=='live_tomorrow'?['final-business-scan-window','final-business-scan-stable']:[]),
+  ...(future?['source-age','binding-age','binding','prepared-request','request-hash','content-hash','evidence-recipient','evidence-source']:[])])
+test(`${future?'prepared-intent':'legacy'} ${kind} rechecks after durable commit: ${fault}`,async()=>{
+  const {f,sender,target,posts}=await nextDayCommitBoundary({kind,future,fault});
+  if(fault==='stable'||fault==='final-business-scan-stable'){
+    assert.equal(posts.length,1);assert.equal(target.state,future?'verifying':'sent');
+    return;
+  }
+  if(fault==='post-timeout'){
+    assert.equal(posts.length,1);assert.equal(target.state,'attention');assert.equal(target.unknown,true);
+    if(future)assert.equal(target.futureEvidence.phase,'prepared');
+    await sender.flush();assert.equal(posts.length,1,'an invoked POST with unknown result may never be repeated');
+    return;
+  }
+  assert.equal(posts.length,0);
+  const unavailable=['permit-read-error','store-read-error'].includes(fault);
+  assert.equal(target.state,fault==='lease-changed'?'sending':fault==='unknown'||unavailable?'attention':'superseded');
+  assert.equal(Boolean(target.unknown),fault==='unknown');
+  assert.equal(target.leaseId,fault==='lease-changed'?'different-current-lease':undefined);
+  if(unavailable)assert.match(target.error,/未发送/);
+  if(future){assert.equal(target.futureEvidence.phase,'prepared');assert.match(target.futureEvidence.requestHash,/^[a-f0-9]{64}$/u);}
+  await sender.flush();assert.equal(posts.length,0,'a blocked or uncertain notice must never POST on the next tick');
+  f.data.tasks[0].runtime.participants=['A'];
+  // Known-unposted legacy failures retain the existing explicit manager retry;
+  // the automatic tick still does not retry. A prepared intent never may.
+  if(future||!unavailable)assert.throws(()=>sender.retry({user:{number:'A'},canManage:true},target.id));
 });
