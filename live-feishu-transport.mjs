@@ -1,5 +1,6 @@
 import {EventDispatcher,WSClient,LoggerLevel,Domain} from '@larksuiteoapi/node-sdk';
 import {requireFact} from './workflow-store.mjs';
+import {LIVE_NOTE_INPUT_MESSAGES} from './live-feishu-inbox.mjs';
 
 const APP_ID='cli_aa9c744d6ffa1cc4';
 // This receiver is registered only on the official app-authenticated outbound
@@ -32,7 +33,11 @@ export class LiveFeishuTransport {
             messageId:raw.context?.open_message_id,openId:raw.operator?.open_id,
             action:raw.action.name,form:{note,actualStart:form.actualStart,actualEnd:form.actualEnd,platformSessionId:form.platformSessionId,evidenceUrl:form.evidenceUrl}});
           return {toast:{type:result.status==='attention'?'error':'info',content:result.status==='attention'?'此操作待负责人核验，请勿重复提交。':result.status==='done'?'此操作已处理，请查看卡片回执。':'已接收，正在核验班表和办理条件；尚未标记完成。'}};
-        }catch{return {toast:{type:'error',content:'此卡片暂不可办理，请使用发给本人的最新通知或联系负责人。'}};}
+        }catch(error){
+          const noteMessage=LIVE_NOTE_INPUT_MESSAGES[raw?.action?.name];
+          const safeInputHint=typeof noteMessage==='string'&&error?.status===400&&error.message===noteMessage;
+          return {toast:{type:'error',content:safeInputHint?noteMessage:'此卡片暂不可办理，请使用发给本人的最新通知或联系负责人。'}};
+        }
       },
     });
     this.client=new this.Client({appId:this.appId,appSecret:this.appSecret,domain:Domain.Feishu,logger,loggerLevel:LoggerLevel.error,

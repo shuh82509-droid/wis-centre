@@ -70,11 +70,27 @@ test('Feishu completion checks actual times and evidence, then waits for assista
   assert.equal((await f.actions.handle(f.event(id,'live_complete',form))).status,'completed');assert.equal(f.store.read().flowEvents.length,count);
   await assert.rejects(f.actions.handle(f.event(id,'live_complete',{...form,note:'changed replay'})),/内容发生变化/);
 });
+test('final actions still reject one-character notes without acknowledging or completing a ready node',async t=>{
+  const f=await setup(t);await f.ready();const id=f.sendReceipt('W04.S4.E1');
+  const before=f.store.read(),form={note:'好',actualStart:'2026-09-23 09:01',actualEnd:'2026-09-23 12:00',
+    platformSessionId:'test-session',evidenceUrl:'https://example.com/session'};
+  for(const action of ['live_ack','live_issue','live_complete'])
+    await assert.rejects(f.actions.handle(f.event(id,action,form)),/请填写确认说明或交付结论/);
+  const after=f.store.read(),node=f.task.runtime.nodes.find(n=>n.id==='W04.S4.E1');
+  assert.equal(node.state,'ready');assert.equal(node.liveAcknowledgements?.length||0,0);
+  assert.equal(after.flowEvents.length,before.flowEvents.length);
+  assert.equal(after.flowNotifications.length,before.flowNotifications.length);
+  assert.deepEqual(after.liveFeishuReceipts,before.liveFeishuReceipts);
+});
 test('card content has no hub URL, credentials or cross-person actions and respects stage',async t=>{
   const f=await setup(t),id=f.sendReceipt('W04.S4.E1'),notice=f.store.read().flowNotifications.find(x=>x.messageId===id);
   let card=liveFeishuCard(notice,f.task),encoded=JSON.stringify(card);
   assert.equal(card.schema,'2.0');assert.equal(card.config.enable_forward,false);assert.ok(!encoded.includes('workflow-panorama'));assert.ok(!encoded.includes('live_complete'));assert.ok(encoded.includes('live_ack'));
+  const feedback=card.body.elements.find(x=>x.name==='live_feedback').elements.find(x=>x.name==='feedbackNote');
+  assert.equal(feedback.required,true);assert.match(feedback.label.content,/至少2个字/);assert.match(feedback.label.content,/已收到/);
   await f.ready();card=liveFeishuCard(notice,f.task);assert.ok(JSON.stringify(card).includes('actualStart'));assert.ok(card.body.elements.length<=5);
+  const completion=card.body.elements.find(x=>x.name==='live_completion').elements.find(x=>x.name==='completionNote');
+  assert.equal(completion.required,true);assert.match(completion.label.content,/至少2个字/);assert.match(completion.label.content,/实际交付结论/);
   const cohostTask=structuredClone(f.task);cohostTask.runtime.liveSession.cohostDisplay='曹总（老板场）';
   assert.match(JSON.stringify(liveFeishuCard(notice,cohostTask)),/共播：曹总/);
   const names=[];const walk=v=>{if(!v||typeof v!=='object')return;if(v.name)names.push(v.name);for(const x of Object.values(v))if(Array.isArray(x))x.forEach(walk);else if(x&&typeof x==='object')walk(x);};walk(card);assert.equal(names.length,new Set(names).size,'all card form field names must be globally unique');

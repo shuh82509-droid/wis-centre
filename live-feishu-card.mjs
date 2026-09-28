@@ -20,11 +20,11 @@ export function liveFeishuCard(notice, task, {receipt = null} = {}) {
   // An acknowledgement is not completion. Preserve the ability to report a
   // problem or finish a ready node after the first card update.
   if (active) {
-    elements.push({tag:'form', name:'live_feedback', elements:[input('feedbackNote','确认说明或异常情况'),button('live_ack','确认收到排班',!ready),button('live_issue','反馈异常')]});
+    elements.push({tag:'form', name:'live_feedback', elements:[input('feedbackNote','确认说明或真实异常情况（至少2个字，例如“已收到”）'),button('live_ack','确认收到排班',!ready),button('live_issue','反馈异常')]});
     if (ready) elements.push({tag:'form',name:'live_completion',elements:[
       input('actualStart','实际开始时间（例：2026-09-23 09:00，北京时间）'),
       input('actualEnd','实际结束时间（北京时间）'),input('platformSessionId','真实平台场次编号'),
-      input('evidenceUrl','可核验的场次记录链接（https）'),input('completionNote','本场交付结论'),
+      input('evidenceUrl','可核验的场次记录链接（https）'),input('completionNote','本场实际交付结论（至少2个字，例如“本场直播完成，记录见链接”）'),
       button('live_complete','确认实际完成并提交',true),
     ]});
   }

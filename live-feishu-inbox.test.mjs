@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {LiveFeishuInbox} from './live-feishu-inbox.mjs';
+import {LiveFeishuInbox,LIVE_NOTE_INPUT_MESSAGES} from './live-feishu-inbox.mjs';
 const setup=()=>{
   const state={tasks:[{id:'t',runtime:{manager:{number:'manager'}}}],flowNotifications:[{taskId:'t',nodeId:'n',recipient:'person',messageId:'om_test',channel:'live_feishu_card',state:'sent'}]};
   let clock=1000,handled=0,updated=0,fail=false,transactions=0;
@@ -29,4 +29,31 @@ test('idle polls and future retry leases do not rewrite the durable task store',
 test('unverified callbacks, forwarded cards and changed duplicate payloads are rejected',()=>{
   const f=setup();assert.throws(()=>f.inbox.accept({...f.event,verified:false}));assert.throws(()=>f.inbox.accept({...f.event,openId:'ou_other'}));assert.throws(()=>f.inbox.accept({...f.event,messageId:'om_other'}));
   f.inbox.accept(f.event);assert.throws(()=>f.inbox.accept({...f.event,form:{note:'changed'}}));
+});
+test('missing or cleaned one-character notes fail before enqueueing or rewriting any record',()=>{
+  for(const action of ['live_ack','live_issue','live_complete']){
+    const f=setup();f.state.liveFeishuInbox={historical:{id:'historical',state:'attention',error:'retained'}};
+    const before=JSON.stringify(f.state);
+    for(const note of [undefined,'',' ','好',' 好 ','\u0000好\n']){
+      assert.throws(()=>f.inbox.accept({...f.event,action,form:{note}}),error=>
+        error.status===400&&error.message===LIVE_NOTE_INPUT_MESSAGES[action]);
+      assert.equal(JSON.stringify(f.state),before);
+      assert.deepEqual(f.counts(),{handled:0,updated:0,transactions:0});
+    }
+  }
+});
+test('exact message and actor gates run before a safe note input hint is available',()=>{
+  const f=setup(),event={...f.event,form:{note:'好'}};
+  for(const change of [{verified:false},{appId:'other'},{messageId:'om_other'},{openId:'ou_other'}])
+    assert.throws(()=>f.inbox.accept({...event,...change}),error=>
+      !Object.values(LIVE_NOTE_INPUT_MESSAGES).includes(error.message));
+  assert.deepEqual(f.counts(),{handled:0,updated:0,transactions:0});
+});
+test('valid cleaned notes preserve the original payload and duplicate hash without handling business',()=>{
+  const f=setup(),event={...f.event,action:'live_ack',form:{note:' \u0000已收到\n '}};
+  assert.equal(f.inbox.accept(event).status,'queued');
+  const row=Object.values(f.state.liveFeishuInbox)[0];
+  assert.equal(row.event.form.note,event.form.note);assert.equal(row.event.action,'live_ack');
+  assert.equal(row.state,'ready');assert.equal(f.inbox.accept(event).status,'ready');
+  assert.deepEqual(f.counts(),{handled:0,updated:0,transactions:2});
 });

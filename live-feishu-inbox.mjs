@@ -1,5 +1,13 @@
-import {fingerprint} from './task-workflow.mjs';
+import {fingerprint,text} from './task-workflow.mjs';
 import {requireFact} from './workflow-store.mjs';
+
+// Only these safe, fixed input hints may be exposed by the authenticated
+// transport. Do not forward arbitrary business, identity or source errors.
+export const LIVE_NOTE_INPUT_MESSAGES=Object.freeze({
+  live_ack:'确认收到排班前，请填写至少2个字的说明，例如“已收到”；确认收到不会完成工作。',
+  live_issue:'请填写至少2个字的真实异常情况，说明需要负责人协助的问题。',
+  live_complete:'请填写至少2个字的本场实际交付结论；不能用“已收到”代替实际完成。',
+});
 
 // A durable, bounded callback inbox keeps the transport response under 3 s.
 // Only the authenticated SDK adapter may call accept(). All business work and
@@ -19,6 +27,12 @@ export class LiveFeishuInbox {
     for(const key of ['note','actualStart','actualEnd','platformSessionId','evidenceUrl']){
       if(event.form?.[key]!==undefined){requireFact(typeof event.form[key]==='string'&&event.form[key].length<=1000,'卡片字段格式无效');clean.form[key]=event.form[key];}
     }
+    // The actor and exact sent message were checked above. Reject this basic
+    // input mistake before queueing or changing any existing inbox record;
+    // actions.handle() still performs the final business/evidence checks.
+    // Preserve the raw clean payload so valid existing event hashes do not
+    // change when its text is normalized only for this length check.
+    requireFact(text(clean.form.note,1000).length>=2,LIVE_NOTE_INPUT_MESSAGES[clean.action]);
     const id=fingerprint([clean.appId,clean.eventId]),hash=fingerprint(clean);
     return this.actions.runtime.store.transaction(store=>{
       store.liveFeishuInbox??={};const old=store.liveFeishuInbox[id];

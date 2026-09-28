@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {EventDispatcher} from '@larksuiteoapi/node-sdk';
 import {LiveFeishuTransport} from './live-feishu-transport.mjs';
+import {LiveFeishuInbox,LIVE_NOTE_INPUT_MESSAGES} from './live-feishu-inbox.mjs';
+import {requireFact} from './workflow-store.mjs';
 const appId='cli_aa9c744d6ffa1cc4';
 class MockClient {
   constructor(options){this.options=options;this.state='idle';}
@@ -10,6 +12,14 @@ class MockClient {
   close(){this.state='idle';}
 }
 const raw=(changes={})=>({schema:'2.0',header:{app_id:appId,event_id:'event-12345678',event_type:'card.action.trigger'},event:{operator:{open_id:'ou_test'},context:{open_message_id:'om_test'},action:{tag:'button',name:'live_ack',form_value:{feedbackNote:'本人确认收到'}},...changes}});
+const businessInbox=()=>{
+  const state={tasks:[{id:'t'}],flowNotifications:[{taskId:'t',nodeId:'n',recipient:'person',
+    messageId:'om_test',channel:'live_feishu_card',state:'sent'}]};let writes=0;
+  const actions={appId,participants:{actor:({openId})=>{
+    requireFact(openId==='ou_test','只能处理发给本人的工作',403);return {user:{number:'person'}};
+  }},runtime:{store:{read:()=>structuredClone(state),transaction:fn=>{writes++;return fn(state);}}}};
+  return {inbox:new LiveFeishuInbox({actions,clock:()=>1000}),state,writes:()=>writes};
+};
 test('disabled callback transport never connects',()=>{
   const t=new LiveFeishuTransport({appId,appSecret:'test',inbox:{},Client:MockClient});t.start();assert.equal(t.client,null);assert.equal(t.ready(),false);
 });
@@ -39,4 +49,40 @@ test('the existing formal WS routes an approved test receipt to its isolated led
   const invalid=raw({action:{tag:'button',value:{action:'confirm_live_test'}}});invalid.header.app_id='wrong';
   assert.equal((await t.client.dispatcher.invoke(invalid,{needCheck:false})).toast.type,'error');
   assert.equal(accepted.length,1);t.stop();
+});
+test('authenticated one-character input returns the exact safe hint before entering the business queue',async()=>{
+  const f=businessInbox(),t=new LiveFeishuTransport({appId,appSecret:'test',enabled:true,
+    inbox:f.inbox,Client:MockClient});t.start();
+  for(const action of ['live_ack','live_issue','live_complete']){
+    const event=raw({action:{tag:'button',name:action,
+      form_value:{feedbackNote:'好',completionNote:'好'}}});
+    const reply=await t.client.dispatcher.invoke(event,{needCheck:false});
+    assert.equal(reply.toast.type,'error');assert.equal(reply.toast.content,LIVE_NOTE_INPUT_MESSAGES[action]);
+    assert.equal(f.writes(),0);assert.equal(f.state.liveFeishuInbox,undefined);
+  }
+  t.stop();
+});
+test('forwarded, unmatched or unauthenticated messages keep a generic toast even with a short note',async()=>{
+  const f=businessInbox(),t=new LiveFeishuTransport({appId,appSecret:'test',enabled:true,
+    inbox:f.inbox,Client:MockClient});t.start();
+  const wrongApp=raw({action:{tag:'button',name:'live_ack',form_value:{feedbackNote:'好'}}});
+  wrongApp.header.app_id='other';
+  const events=[wrongApp,
+    raw({operator:{open_id:'ou_other'},action:{tag:'button',name:'live_ack',form_value:{feedbackNote:'好'}}}),
+    raw({context:{open_message_id:'om_other'},action:{tag:'button',name:'live_ack',form_value:{feedbackNote:'好'}}})];
+  for(const event of events){
+    const reply=await t.client.dispatcher.invoke(event,{needCheck:false});
+    assert.equal(reply.toast.type,'error');assert.match(reply.toast.content,/此卡片暂不可办理/);
+    assert.ok(!Object.values(LIVE_NOTE_INPUT_MESSAGES).includes(reply.toast.content));
+  }
+  assert.equal(f.writes(),0);t.stop();
+});
+test('valid confirmation queues only an acknowledgement and never claims completed work',async()=>{
+  const f=businessInbox(),t=new LiveFeishuTransport({appId,appSecret:'test',enabled:true,
+    inbox:f.inbox,Client:MockClient});t.start();
+  const reply=await t.client.dispatcher.invoke(raw({action:{tag:'button',name:'live_ack',
+    form_value:{feedbackNote:'已收到'}}}),{needCheck:false});
+  assert.equal(reply.toast.type,'info');assert.match(reply.toast.content,/尚未标记完成/);
+  const row=Object.values(f.state.liveFeishuInbox)[0];assert.equal(row.event.action,'live_ack');
+  assert.equal(row.state,'ready');assert.equal(row.result,undefined);assert.equal(f.writes(),1);t.stop();
 });
