@@ -1,31 +1,86 @@
-# 4.9.2 dynamic next-day reminder: read-only candidate
+# 4.9.2 next-day reminder: read-only evidence collection
 
-Status: **offline diagnostic only / production NO-GO**. The old `release-r61-nextday-20260925` scripts are unchanged. This directory has no Feishu credential, POST, permit writer, Docker mutator, scheduler or cutover command. `evaluateNextDayEvidence()` always returns `safeToEnable: false`; a test fixture passing its checks is not a release authorization.
+Status: **diagnostic code delivered; production NO-GO**. This directory neither enables a production reminder nor sends a message, signs a permit, modifies an official sheet, refreshes a user OAuth grant, or changes a container. Passing synthetic tests is not live acceptance.
 
-## Historical formal snapshot, 2026-09-27 09:46 Shanghai (not release authority)
+## Components
 
-- Formal Hub `07868bcf7eea…` remains healthy on `sha256:6840992d…`. Its current environment reports `FLOW_LIVE_NEXT_DAY_NOTIFICATIONS=false`, with no war-room chat ID, permit path or permit verification key. `/app/live-next-day-release.mjs` is absent. Neither this container nor the r69 Stage-4 assignment candidate can be enabled by changing one environment flag.
-- A fresh application-identity GET of the four official room tabs for **2026-09-28** returned workbook revision **189107** in all four tabs and no raw parser issues. The dated blocks are 官旗 rows 2440–2448 (9 anchor periods), 品牌精选 rows 8414–8419 (8), 优选 rows 5613–5621 (9), and 王鸥美肤 rows 3973–3978 (8). A parsed row is not a verified person or dispatched task.
-- Read-only `task-center.json` aggregation for 2026-09-28 showed **17 active tasks and 44 `live_assignment` cards with `sent` plus a message ID**, all in 品牌精选 (8) and 优选 (9). 官旗 and 王鸥美肤 had zero tasks; 9/28 next-day notice rows were zero. The current dispatch issue ledger had two 官旗 and one 王鸥 issue. Identity labels 「邓启哲（兼职）」 and 「邓淑环（借调）」 still require the commissioning owner's confirmation; do not silently strip their suffixes. `sent` does not prove the intended person's chat, reading or business completion.
-- The previous gate and cutover in `release-r61-nextday-20260925` pin 2026-09-26, 37 sessions, 94 cards, 47 users, an old Hub image `sha256:878d843c…` and a historical backup path. They must never be run against this production baseline or made “current” by replacing a few constants.
+- `readiness-core.mjs` evaluates an independently pinned policy and derives D+1 in Asia/Shanghai. It checks exact gateway and three-service topology, current incarnation, unique writers and all dormant same-volume RW holders, four-room source consistency, current tasks and owner cards, independent bot recipient proof, approved war-room test, unknown/in-flight notification ledger, fresh three-service stopped-writer backup/restore evidence and four genuine OA acceptance cases (module, old-action link, old-record link and personal scope). Activation and renewal have separate time gates. `safeToEnable` is always false in this diagnostic layer.
+- `readiness-collector.mjs` orchestrates only read operations, with up to four in-flight reads. A caller-supplied JSON, transport or boolean cannot provide release authorization.
+- `trusted-policy.mjs` reads separate policy, topology-pin and artifact-config files by raw-byte SHA-256, without symlink/alias substitution, and freezes the loaded input. Pins must come from an independent approved source; this code does not manufacture policy approval.
+- `trusted-topology.mjs` reads the rootless Docker inventory, every declared data-mount holder, actual nginx configuration and independently fetched direct/gateway health bodies. Initial and final inventory/CAS checks bind IDs, images, mounts, start times, routes and the Hub instance. These checks are conservative; they do not yet prove Linux kernel mount identity.
+- `trusted-hub-reads.mjs` uses a fixed read-only script inside the pinned Hub container. It reads approved bindings and the ledger, verifies the exact parser/card module graph by byte hashes, parses the four approved tabs and derives sessions/cards without instantiating a store, starting a scheduler/notifier or performing writes. The verified transitive imports do include store/runtime module definitions.
+- `trusted-bot-reads.mjs` permits a fixed set of application-identity reads only: actual bot identity, bound users, exact message, chat/P2P proof, fixed war-room detail/roster and the four official sheet tabs. Exact message reads use native `GET /open-apis/im/v1/messages/:message_id`, not the shortcut that automatically expands thread replies. The actual bot `open_id` must match the independently approved pin before any resource read.
+- `trusted-artifacts.mjs` compares actual backup/archive/restored-tree bytes and pinned stop/restore reports for all three services; OA evidence requires independently produced authenticated DOM/export and screenshot bytes for all four acceptance cases (module, old-action, old-record and personal). It does not create a backup, restore data, export a browser session, or replace real visual acceptance.
+- `trusted-child-process.mjs` bounds output and waits for the killed client process to close after cancellation. Client closure is not yet proof that a remote Docker exec or a native CLI descendant has terminated.
+- `trusted-read-ops.mjs` composes the concrete diagnostic adapter. At the end it re-reads all four source tabs, bindings, full ledger and topology, rechecks the raw input pins and evaluates freshness against the finished clock. It has no signing or sending entry point.
 
-## Candidate files and intended contract
+## Live entry point and deliberate NO-GO boundary
 
-- `readiness-core.mjs` derives D+1 in Asia/Shanghai and checks a **separately pinned policy** against current gateway/Hub/Calendar/Dispatch IDs and images, routes, healthy unique writers, dormant auto-restart RW containers, exact data mounts, a current **Hub** stopped-writer backup and authenticated OA-page readback. It does **not** yet verify fresh stopped-writer backups for Calendar and Dispatch or visual acceptance of an old notification link. It then checks all four official rooms and a single fresh workbook revision, every derived shift versus one running task, exactly one current owner/node and sent card per person, independently read bot message plus exact recipient open_id/P2P proof, precise war-room identity and an externally approved test readback, the historical unknown hash, no in-flight send, no prior D+1 reminder, and first-install Shanghai 15:40–15:55. All counts are derived; there is no hard-coded future date, 37/94/47 count or reusable old permit.
-- `readiness-collector.mjs` is a read-only orchestration interface. Its adapter methods must get current topology twice, official workbook fresh, approved bindings, live contact state, shifts derived with the exact pinned production parser, Hub state, each Feishu card, its independently fetched **bot** chat detail proving normal `p2p` mode, and a bot exact-peer proof, group and approved test, backup and authenticated OA page. Identity and per-card GET phases use bounded concurrency (default 4; only integers 1–4), preserving source order and every row's issue. Bot chat detail may be shared within one collection; peer/read-user proofs remain specific to each message. A failed read records an issue; a group card is rejected before any read-user fallback. A P2P-member proof must be complete and contain exactly the intended `open_id`; a read-user proof must be complete, tied to this precise `message_id`, and contain that `open_id`. An empty read-user list is **unread/unknown**, not recipient proof. Any topology change during collection rejects the evidence. It accepts no send or write adapter. It does not itself implement the actual Docker/Feishu/OA adapter and **cannot authorize production** from a caller-supplied JSON or boolean.
-- `readiness-core.test.mjs` and `readiness-collector.test.mjs`: the two-file Windows suite passed **25/25**. Tests cover date rollover and 15:55 cutoff, CAS/writer/backup, source revision/room gaps, missing tasks/cards, absent bot recipient proof, group read-user and different-message mistakes, unread user, `unknown`/`sending`/existing notice, group test and OA, missing bot scope and mid-collection topology drift. Added concurrency tests bound in-flight GETs, preserve out-of-order results and per-card errors, and prohibit chat caching from crossing recipient/message proofs. These are synthetic tests, not Feishu delivery or real OA acceptance.
+The live entry point is Linux-only:
 
-The diagnostic gate is now recomputed by `live-next-day-release.mjs` at initial signing, renewal and the atomic commit point after all fsync operations. Signing requires a separately supplied `readinessPolicy` plus `externallyPinnedPolicyHash` from independent read-only, operator-approved configuration; it rejects policy embedded in evidence and any digest mismatch. The digest is included in both the evidence hash and Ed25519 signed fields. Legacy and canonical card readbacks must agree on message, chat, sender, exact person, proof kind and contents, and timestamps. Expired nested evidence or changed signed evidence prevents rename; a failed renewal preserves the old permit. Passing `checksPassed` alone is never authorization. Six-file Windows regression (assignment readiness, live sessions, next-day reminder, notification service, core and collector) passed **124/124** after these changes.
+```js
+const reader = await createTrustedReadOps({
+  policyPath,
+  pinnedPolicySha256,
+  topologyPinPath,
+  artifactConfigPath,
+});
+const result = await reader.collect({mode: "preview"});
+```
 
-The collector still has **no concrete trusted Docker/Feishu/OA adapter** or independent approved-policy configuration. Four-way bounded collection reduces latency without extending the 120-second limit; final fresh source/state/CAS verification and the full three-service backup/real-link cutover gate still require implementation and live acceptance. No offline fixture or caller-generated policy proves a real group approval.
+The four inputs above are paths/digest, not approval switches. Do not supply a policy copied from evidence, self-approved fixtures, historical container IDs or fabricated artifact reports. The release-side adapter must run with an independently approved policy and real, current artifacts before its runtime can even be evaluated.
 
-## Remaining hard gates before any production send
+Every adapter result unconditionally retains these three blockers:
 
-1. Freshly derive the target day's four rooms and resolve only the affected source/identity blocks; do not create duplicate tasks or guess a person. The historical 9/28 snapshot had only 17/34 anchor periods with tasks and is not a reusable release input. Any current room/task/card gap keeps the four-room release manifest closed.
-2. Obtain an explicit, still-valid approval for a single labeled war-room test and independently read its exact bot message ID; no group test has been sent by this candidate. Distinguish one-time test approval from ongoing production group notifications.
-3. Prove each current card's actual intended `open_id` with an independent bot readback. Official [message GET](https://open.feishu.cn/document/server-docs/im-v1/message/get) provides `chat_id`, sender and content, not the P2P peer. Official [chat GET](https://open.feishu.cn/document/server-docs/group/chat/get-2) provides `chat_mode=p2p`, not the peer ID. Official [read-users GET](https://open.feishu.cn/document/server-docs/im-v1/message/read_users) is positive-only, limited to the bot's own messages from the past seven days; it does not identify unread recipients. Current bot [P2P member GET](https://open.feishu.cn/document/server-docs/group/chat-member/get) has returned `99991672`; a user's successful lookup or an app `sent` ledger row is not equivalent. Do not request or use extra scope without approval. Future immutable send-intent/readback code cannot backfill provenance for old cards.
-4. Build and test a **new exact-current-baseline** Hub candidate that incorporates the reviewed Ed25519 permit reader, separately mounted read-only permit directory, dynamic daily installer, non-rollback release witness and one writer. The r69 exact-r65 Stage-4 candidate does not contain the next-day permit reader. Keep the runtime no-permit state OFF even if a legacy environment flag is ON.
-5. Freshly inspect the actual gateway and three service containers, eliminate dormant restartable RW double-writer risk, take new stopped-writer backups for Hub, Calendar and Dispatch and prove a latest-data-preserving rollback, then verify a genuine authenticated OA page **and an old notification link**. The present diagnostic checks only the Hub backup and OA-page readback, not the full cutover gate. Historical backups and anonymous HTTP checks are insufficient.
-6. Only after all gates pass, first sign the date-specific permit in the permitted window, keep each renewal within the previous permit's validity, and read back every D+1 DM/group message and duplicate key. A timeout, 5xx, absent message ID, unknown recipient or missed cutoff is a stop condition, never a reason to send again. Human acknowledgement and all five actual workflow stages remain a separate acceptance track.
+1. `trusted_kernel_mount_identity_unproven`
+2. `trusted_transport_lifetime_unproven`
+3. `trusted_linux_cli_compatibility_unverified`
 
-These are code-only diagnostics and permit safeguards. They do not change a formal service, Feishu chat, official spreadsheet, permission or data volume; code delivery to Git is separate from candidate packaging, production cutover and actual business acceptance.
+No policy value or caller `trusted*=true` field can remove them. The result stays `diagnosticOnly: true`, `checksPassed: false` and `safeToEnable: false`, including activation and renewal modes. The existing permit/signing safeguards in the Hub candidate remain separate; this adapter is not an accepted production evidence producer and must not be connected to a production permit writer.
+
+A local read-only check with Windows lark-cli 1.0.80 returned an empty `data` object for native bot-info GET. That does **not** prove the bot is disabled or establish its actual identity. The strict adapter rejects such a response rather than using a profile/configuration name as proof. Native Linux CLI response compatibility remains unverified. No current user, card or sheet was read through this new adapter. The new `createTrustedReadOps/collect` entry point has not been run against production or on the Linux host.
+
+## Verification completed on 2026-09-28
+
+`node --test scripts/live-nextday-readiness/*.test.mjs` passed **169/169 on Windows**:
+
+- Existing readiness core/collector: 35.
+- Trusted topology: 75.
+- Trusted backup/OA artifacts: 16.
+- Trusted policy, bot/Hub composition, cancellation and final drift checks: 43.
+
+These tests use isolated fixtures and injected read transports, not real Feishu delivery, live Linux CLI compatibility or authenticated OA visual acceptance. Independent review verified that an otherwise passing full-gate fixture still remains NO-GO in preview, activation and renewal; altered bot arguments and a mismatched bot identity cannot perform resource reads.
+
+The previously built exact-r65 Hub OFF candidate remains a **different artifact**, image `sha256:9c4f3ba864bfdfee7c0faa281620d3d7a8bbc46875f1a924ab7fa2c501d5460d`. Its prior isolated Linux suite passed 257/257, but it was not switched to production. This release-side diagnostic addition does not alter that image or make it live.
+
+## Historical production readback, not release authority
+
+The 2026-09-28 09:11 Shanghai readback found the actual gateway routing to:
+
+- Hub r65 `07868bcf7eea…`, image `sha256:6840992d…`.
+- Calendar r60 `aad49b32eec8…`, image `sha256:ffd3f09d…`.
+- Dispatch r57 `75f28f4e6120…`, image `sha256:9f2e8d18…`.
+
+All three services were healthy with one running RW writer each. There were still **8 / 14 / 6 dormant same-volume RW containers** respectively. The gateway had no Docker healthcheck; actual nginx configuration, not a inferred healthy status, identified the formal routes.
+
+The 09:18 read-only ledger aggregation found **170 workflow04 tasks, 0 human-completed nodes, 0 completed workflow04 tasks, 32 receipt records and 0 next-day reminder rows**. Global historical unknown sends remained 7 and were not resent. A ledger receipt or `sent` row is not proof of a complete five-stage real-business path. Next-day group reminders, Calendar recruitment reminders/scheduler and Dispatch total-sheet import remained OFF. This snapshot is not reusable evidence for a later collection.
+
+## Remaining release and business gates
+
+- Prove the three adapter runtime gaps above on the actual Linux execution host without bypassing browser or OAuth boundaries.
+- Obtain independently approved current pins, actual identity/source/message proofs, the authorized single war-room test readback and genuine OA/old-link artifacts. No group test is sent by this code.
+- Reconcile affected room/person blocks without guessing names or creating duplicate sessions; retain unread/permission-denied recipient proof as unknown.
+- Before any cutover, recheck the current baseline, isolate every old same-volume RW holder, take complete fresh stopped-writer backups for all three services, verify isolated recovery and a rollback that preserves the latest business data.
+- Only enable date-specific notifications in the approved valid time window after every gate passes. Unknown results and missed deadlines are not a reason to resend or backfill.
+- Four coaches must authorize their own calendars before real review counts; source-table and cross-room personal-rest rules must be confirmed before affected writes/imports.
+- All five stages must be performed by the real responsible person, anchor and assistant, then checked room by room against their actual node evidence and per-node notification receipts. No test card, successful API or clickable page substitutes for this.
+
+Old scripts in `release-r61-nextday-20260925` pin retired containers and historical data. Do not run them against current production.
+
+Git delivery, isolated candidate verification, production cutover and real business acceptance are reported separately. No production service, user data, official sheet, permission or message was changed by this diagnostic work.
+
+## Primary API contracts
+
+- [Get bot information](https://open.feishu.cn/document/client-docs/bot-v3/obtain-bot-info)
+- [Get a single message](https://open.feishu.cn/document/server-docs/im-v1/message/get)
+- [Get a user](https://open.feishu.cn/document/server-docs/contact-v3/user/get)
