@@ -24,7 +24,7 @@ function fixture(){
   let nginx=config();pin.gateway.configHash=sha(nginx);policy.gatewayConfigHash=sha(nginx);
   const selected={gateway:pin.gateway,...pin.services};
   const containers=Object.entries(selected).map(([role,p],index)=>({Id:p.id,Image:p.image,Name:'/'+p.name,
-    State:{Running:true,Status:'running',StartedAt:START,...(role==='gateway'?{}:{Health:{Status:'healthy'}})},
+    State:{Running:true,Status:'running',Pid:1000+index,StartedAt:START,...(role==='gateway'?{}:{Health:{Status:'healthy'}})},
     Config:{Env:['SECRET=must-not-leak']},
     NetworkSettings:{Networks:{[pin.network.name]:{NetworkID:pin.network.id,Aliases:role==='gateway'?[p.name]:[p.name,p.alias],IPAddress:'172.18.0.'+(index+2)}}},
     Mounts:role==='gateway'?[{Type:'bind',Source:p.configSource,Destination:'/etc/nginx/nginx.conf',RW:false}]:
@@ -58,10 +58,31 @@ function fixture(){
     return changed||new Response(JSON.stringify(body),{status:200,headers:{'content-type':'application/json'}});
   };
   f.realpathImpl=async source=>source;
-  f.reader=()=>createDockerTopologyReader({pin,policy,clock:f.clock,execFileImpl:f.execFileImpl,fetchImpl:f.fetchImpl,realpathImpl:f.realpathImpl});
+  f.kernelReads=[];f.kernelChange=null;
+  const actualMounts=c=>c.Mounts.filter(m=>m.Type!=='tmpfs');
+  const statRow=source=>({dev:64771n,ino:BigInt(parseInt(sha(source).slice(0,12),16)),
+    isDirectory:()=>!source.endsWith('nginx.conf'),isFile:()=>source.endsWith('nginx.conf')});
+  f.kernelFsImpl={
+    readTextBounded:async(file,max)=>{f.kernelReads.push(file);let value;
+      if(file==='/proc/self/mountinfo')value='1 1 253:3 / / rw - ext4 /dev/root rw\n';
+      else{const pid=Number(file.split('/')[2]),c=containers.find(c=>c.State.Pid===pid);
+        assert.ok(c,'Only observed PID may be read');
+        if(file.endsWith('/stat'))value=pid+' (worker (safe name)) S '+Array(18).fill('0').join(' ')+' 123456\n';
+        else if(file.endsWith('/mountinfo'))value='1 1 0:50 / / rw - overlay overlay rw\n'+actualMounts(c).map((m,i)=>
+          `${i+2} 1 253:3 ${m.Source} ${m.Destination} ${m.RW?'rw':'ro'} - ext4 /dev/root rw`).join('\n')+'\n';
+        else throw new Error('No arbitrary proc file');}
+      return await f.kernelChange?.({op:'read',file,value,max})??value;},
+    readlink:async file=>{f.kernelReads.push(file);const value='mnt:['+file.split('/')[2]+']';
+      return await f.kernelChange?.({op:'link',file,value})??value;},
+    stat:async(file,opts)=>{f.kernelReads.push(file);assert.equal(opts.bigint,true);let source=file;
+      if(file.startsWith('/proc/')){const pid=Number(file.split('/')[2]),dest=file.slice(file.indexOf('/root')+5),c=containers.find(c=>c.State.Pid===pid);
+        source=actualMounts(c).find(m=>m.Destination===dest)?.Source;assert.ok(source);}
+      const value=statRow(source);return await f.kernelChange?.({op:'stat',file,value})??value;}
+  };
+  f.reader=()=>createDockerTopologyReader({pin,policy,clock:f.clock,execFileImpl:f.execFileImpl,fetchImpl:f.fetchImpl,realpathImpl:f.realpathImpl,kernelFsImpl:f.kernelFsImpl});
   f.service=role=>containers.find(c=>c.Id===pin.services[role].id);
   f.extra=({status='exited',source=pin.services.hub.dataMount.source,binds=true,mounts=true,restart='no',type='bind',volumeName}={})=>{
-    const row={Id:id(99),Image:image(99),Name:'/old-holder',State:{Running:status==='running',Status:status,StartedAt:START},
+    const row={Id:id(99),Image:image(99),Name:'/old-holder',State:{Running:status==='running',Status:status,Pid:1099,StartedAt:START},
       NetworkSettings:{Networks:{}},Mounts:mounts?[{Type:type,Source:source,Name:volumeName,Destination:'/old-data',RW:true}]:[],
       HostConfig:{Binds:binds?[(type==='volume'?volumeName:source)+':/old-data:rw']:null,Mounts:[],VolumesFrom:null,
         RestartPolicy:{Name:restart},PortBindings:{}}};containers.push(row);return row;
@@ -271,4 +292,73 @@ test('hung health read aborts/cancels response within the fixed bound',{timeout:
   f.fetchImpl=async(_url,options)=>{options.signal.addEventListener('abort',()=>{aborted=true;});
     return new Response(new ReadableStream({pull(){return new Promise(()=>{});},cancel(){cancelled=true;}}),{status:200,headers:{'content-type':'application/json'}});};
   await rejected(f,'health_read_timeout');assert.equal(aborted,true);assert.equal(cancelled,true);
+});
+
+test('kernel proofs bind inspect PID, exact comm-safe startticks, namespace and mounted dev/ino',async()=>{
+  const f=fixture(),x=await f.reader()();
+  for(const role of ROLES){const proof=x.services[role].kernelMountIdentity;
+    assert.equal(proof.pid,f.service(role).State.Pid);assert.equal(proof.startTicks,'123456');
+    assert.equal(proof.mountNamespace,'mnt:['+proof.pid+']');assert.equal(proof.mounts[0].dev,'64771');
+    assert.equal(proof.mounts[0].kind,'directory');assert.match(proof.mountinfoSha256,/^[a-f0-9]{64}$/u);}
+  assert.ok(f.kernelReads.every(p=>p==='/proc/self/mountinfo'||/^\/proc\/\d+\/(stat|mountinfo|ns\/mnt|root\/)/u.test(p)||p.startsWith('/srv/')));
+  assert.ok(!f.kernelReads.some(p=>/environ|cmdline|\/fd\//u.test(p)));
+});
+for(const [label,change,code] of [
+  ['missing inspect PID',f=>{delete f.service('hub').State.Pid;},'kernel_pid_invalid'],
+  ['wrong PID in proc stat',f=>{f.kernelChange=({op,file,value})=>op==='read'&&file.endsWith('/stat')?value.replace(/^\d+/u,'999999'):value;},'kernel_process_stat_invalid'],
+  ['missing startticks',f=>{f.kernelChange=({op,file,value})=>op==='read'&&file.endsWith('/stat')?value.replace(/123456/u,'unknown'):value;},'kernel_process_stat_invalid'],
+  ['actual inode differs',f=>{f.kernelChange=({op,file,value})=>op==='stat'&&file.includes('/root/app/data')?{...value,ino:value.ino+1n}:value;},'kernel_mount_identity_mismatch'],
+  ['actual device differs',f=>{f.kernelChange=({op,file,value})=>op==='stat'&&file.includes('/root/app/data')?{...value,dev:value.dev+1n}:value;},'kernel_mount_identity_mismatch'],
+  ['source redirected in mountinfo',f=>{f.kernelChange=({op,file,value})=>op==='read'&&file.endsWith('/mountinfo')&&file!=='/proc/self/mountinfo'?value.replace('/srv/hub-data','/srv/redirected'):value;},'kernel_declared_mount_drift'],
+  ['undeclared child over protected full mount',f=>{f.kernelChange=({op,file,value})=>op==='read'&&file==='/proc/1001/mountinfo'?value+'98 2 0:9 / /app/data/sub rw - tmpfs tmpfs rw\n':value;},'kernel_protected_mount_shadowed'],
+  ['stacked same mountpoint',f=>{f.kernelChange=({op,file,value})=>op==='read'&&file==='/proc/1001/mountinfo'?value+'98 2 253:3 /srv/hub-data /app/data rw - ext4 /dev/root rw\n':value;},'kernel_declared_mount_missing_or_shadowed'],
+  ['kernel RO differs from declared RW',f=>{f.kernelChange=({op,file,value})=>op==='read'&&file==='/proc/1001/mountinfo'?value.replace('/app/data rw','/app/data ro'):value;},'kernel_declared_mount_drift'],
+  ['proc permission denial',f=>{f.kernelChange=({op,file,value})=>{if(op==='read'&&file.endsWith('/mountinfo'))throw new Error('SECRET EACCES');return value;};},'kernel_metadata_unavailable'],
+  ['namespace unavailable',f=>{f.kernelChange=({op,value})=>{if(op==='link')throw new Error('SECRET EPERM');return value;};},'kernel_namespace_unavailable'],
+  ['mounted target unavailable',f=>{f.kernelChange=({op,file,value})=>{if(op==='stat'&&file.includes('/root/app/data'))throw new Error('SECRET EACCES');return value;};},'kernel_mount_target_unavailable'],
+  ['malformed namespace',f=>{f.kernelChange=({op,value})=>op==='link'?'SECRET malformed':value;},'kernel_namespace_invalid'],
+  ['oversized proc metadata',f=>{f.kernelChange=({op,file,value})=>op==='read'&&file.endsWith('/mountinfo')?'x'.repeat(1024*1024+1):value;},'kernel_metadata_oversize'],
+])test(label+' is kernel NO-GO before probes',async()=>{const f=fixture();change(f);await rejected(f,code);assert.equal(f.requests.length,0);});
+for(const kind of ['namespace','startticks','mountinfo'])test(kind+' changes inside observation and is rejected',async()=>{
+  const f=fixture();let count=0;
+  f.kernelChange=({op,file,value})=>{
+    if(file==='/proc/1001/'+(kind==='namespace'?'ns/mnt':kind==='startticks'?'stat':'mountinfo')&&++count===2)
+      return kind==='namespace'?'mnt:[777]':kind==='startticks'?value.replace('123456','123457'):value+'99 1 0:9 / /other rw - tmpfs tmpfs rw\n';
+    return value;};await rejected(f,'kernel_process_or_mount_changed');
+});
+test('inspect PID reuse between full observations cannot pass CAS',async()=>{
+  const f=fixture();f.phaseChange=n=>{if(n===2)f.service('hub').State.Pid=2001;};
+  await rejected(f,'topology_changed_during_read');
+});
+test('host directory renamed/replaced during observation is rejected',async()=>{
+  const f=fixture();let count=0;f.kernelChange=({op,file,value})=>op==='stat'&&file==='/srv/hub-data'&&++count>1?
+    {...value,ino:value.ino+1n}:value;await rejected(f,'kernel_mount_identity_changed');
+});
+test('unlisted kernel RW parent mount makes another namespace a writer',async()=>{
+  const f=fixture();f.extra({status:'running',source:'/srv/unrelated'});
+  f.kernelChange=({op,file,value})=>op==='read'&&file==='/proc/1099/mountinfo'?
+    value+'99 1 253:3 /srv /hidden-parent rw - ext4 /dev/root rw\n':value;
+  const x=await f.reader()();assert.equal(x.unsafeWriters,true);
+  assert.deepEqual(x.services.hub.runningRwWriters,[id(2),id(99)]);
+});
+test('same inode in a distinct namespace and source spelling is still a writer',async()=>{
+  const f=fixture();f.extra({status:'running',source:'/srv/alias-directory'});
+  let sourceIdentity;f.kernelChange=({op,file,value})=>{
+    if(op==='stat'&&file==='/srv/hub-data')sourceIdentity=value;
+    return op==='stat'&&(file==='/srv/alias-directory'||file==='/proc/1099/root/old-data')?sourceIdentity:value;};
+  const x=await f.reader()();assert.equal(x.unsafeWriters,true);assert.deepEqual(x.services.hub.runningRwWriters,[id(2),id(99)]);
+});
+test('kernel BigInt inode never rounds to a neighboring unsafe identity',async()=>{
+  const f=fixture();f.kernelChange=({op,file,value})=>op==='stat'&&file==='/srv/hub-data'?{...value,ino:9007199254740993n}:
+    op==='stat'&&file==='/proc/1001/root/app/data'?{...value,ino:9007199254740992n}:value;
+  await rejected(f,'kernel_mount_identity_mismatch');
+});
+test('slow native metadata completion fails closed and is drained',async()=>{
+  const f=fixture();let time=NOW;f.clock=()=>time;f.kernelChange=({op,value})=>{if(op==='stat')time+=10001;return value;};
+  await rejected(f,'kernel_metadata_timeout');
+});
+test('kernel observation time is captured before reads rather than refreshed at completion',async()=>{
+  const f=fixture();let counter=0;f.clock=()=>NOW+counter++;
+  const x=await f.reader()();assert.ok(Date.parse(x.services.hub.kernelMountIdentity.checkedAt)<Date.parse(x.observedAt));
+  assert.ok(Date.parse(x.services.hub.checkedAt)<=Date.parse(x.services.hub.kernelMountIdentity.checkedAt));
 });

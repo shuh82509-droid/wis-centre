@@ -3,6 +3,9 @@
 // this adapter cannot obtain/refresh a user OAuth grant, send IM or add scopes.
 import {requireRead} from './trusted-policy.mjs';
 import {runReadChild} from './trusted-child-process.mjs';
+import {constants} from 'node:fs';
+import {mkdtemp, open, realpath, lstat, unlink, rmdir} from 'node:fs/promises';
+import {join, relative, resolve, isAbsolute} from 'node:path';
 
 const messageId = value => /^om_[A-Za-z0-9_-]+$/u.test(value || '');
 const chatId = value => /^oc_[A-Za-z0-9_-]+$/u.test(value || '');
@@ -57,6 +60,7 @@ export async function executeBotCommand(args, {signal} = {}) {
   // A raw helper cannot be used to bypass the default read-only boundary.
   validateBotReadArguments(args);
   requireRead(process.platform === 'linux', 'live_reader_requires_linux_host');
+  if (args[2] === '/open-apis/bot/v3/info') return readBotIdentityRawExport({signal});
   const stdout = await runReadChild('lark-cli', args, {signal, maxBytes: 32 * 1024 * 1024});
   let envelope;
   try { envelope = JSON.parse(stdout); }
@@ -70,6 +74,76 @@ export async function executeBotCommand(args, {signal} = {}) {
     return data.data ?? data;
   }
   return data;
+}
+
+// CLI 1.0.80's SuccessEnvelopeData drops API fields outside `data`, whereas
+// bot/v3/info returns top-level `bot`. Its documented --output preserves the
+// original response and keeps credential handling inside the CLI. Only this
+// fixed metadata GET uses a private temporary export; no credential is saved.
+// The runner/baseDirectory seams are fixtures, never live-factory options.
+export async function readBotIdentityRawExport({signal, runner = runReadChild,
+  baseDirectory = process.cwd()} = {}) {
+  requireRead(!signal?.aborted, 'bot_identity_read_aborted');
+  const base = await realpath(baseDirectory), baseScope = relative(await realpath(process.cwd()), base);
+  requireRead(!isAbsolute(baseScope) && !baseScope.startsWith('..'), 'bot_identity_export_scope_invalid');
+  const directory = await mkdtemp(join(base, '.wis-bot-info-'));
+  const target = join(directory, 'response.json'), output = relative(process.cwd(), target);
+  let handle, directoryPin;
+  const directoryUnchanged = async () => {
+    try {
+      const current = await lstat(directory);
+      return directoryPin && current.isDirectory() && !current.isSymbolicLink() &&
+        current.dev === directoryPin.dev && current.ino === directoryPin.ino &&
+        await realpath(directory) === directory;
+    } catch { return false; }
+  };
+  try {
+    directoryPin = await lstat(directory);
+    requireRead(await directoryUnchanged(), 'bot_identity_export_directory_changed');
+    requireRead(output && !isAbsolute(output) && !output.startsWith('..') && !output.includes('\u0000'),
+      'bot_identity_export_scope_invalid');
+    const text = await runner('lark-cli', [...botReadCommand('bot_info'), '--output', output],
+      {signal, maxBytes: 65536});
+    let metadata; try { metadata = JSON.parse(text); } catch { requireRead(false, 'bot_identity_export_metadata_invalid'); }
+    requireRead(metadata && typeof metadata.saved_path === 'string' &&
+      resolve(process.cwd(), metadata.saved_path) === target &&
+      /^application\/json(?:;\s*charset=utf-8)?$/iu.test(metadata.content_type || '') &&
+      Number.isSafeInteger(metadata.size_bytes) && metadata.size_bytes > 0 && metadata.size_bytes <= 65536,
+    'bot_identity_export_metadata_invalid');
+    requireRead(await directoryUnchanged(), 'bot_identity_export_directory_changed');
+    const before = await lstat(target);
+    requireRead(before.isFile() && !before.isSymbolicLink() && before.nlink === 1 &&
+      before.size === metadata.size_bytes, 'bot_identity_export_file_invalid');
+    handle = await open(target, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
+    const pinned = await handle.stat(), bytes = Buffer.alloc(before.size + 1); let offset = 0;
+    requireRead(pinned.dev === before.dev && pinned.ino === before.ino && pinned.size === before.size,
+      'bot_identity_export_changed');
+    while (offset < bytes.length) {
+      requireRead(!signal?.aborted, 'bot_identity_read_aborted');
+      const chunk = await handle.read(bytes, offset, bytes.length - offset, offset);
+      if (!chunk.bytesRead) break; offset += chunk.bytesRead;
+    }
+    const after = await handle.stat(), named = await lstat(target);
+    requireRead(offset === before.size && named.isFile() && !named.isSymbolicLink() && named.nlink === 1 &&
+      [after, named].every(s => s.dev === pinned.dev && s.ino === pinned.ino && s.size === pinned.size &&
+        s.mtimeMs === pinned.mtimeMs && s.ctimeMs === pinned.ctimeMs), 'bot_identity_export_changed');
+    let response; try { response = JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(bytes.subarray(0, offset))); }
+    catch { requireRead(false, 'bot_identity_export_json_invalid'); }
+    requireRead(!signal?.aborted, 'bot_identity_read_aborted');
+    requireRead(response?.code === 0 && response.bot && openId(response.bot.open_id) &&
+      Number.isSafeInteger(response.bot.activate_status), 'bot_identity_native_proof_invalid');
+    // Do not retain avatar, app name, IP whitelist or any unrelated field.
+    return {bot: {open_id: response.bot.open_id, activate_status: response.bot.activate_status}};
+  } finally {
+    await handle?.close();
+    // Never follow a replaced directory even when an earlier guard/runner
+    // failed. Exact pathname checks reduce this mutation hazard; they are not
+    // an atomic dirfd/openat proof and do not remove the fixed release NO-GO.
+    requireRead(await directoryUnchanged(), 'bot_identity_export_directory_changed');
+    try { await unlink(target); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    requireRead(await directoryUnchanged(), 'bot_identity_export_directory_changed');
+    await rmdir(directory);
+  }
 }
 
 export function validateBotReadArguments(args) {

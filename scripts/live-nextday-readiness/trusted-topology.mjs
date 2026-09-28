@@ -4,7 +4,7 @@
 import {execFile} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {isIP} from 'node:net';
-import {realpath} from 'node:fs/promises';
+import {realpath,open,stat,readlink} from 'node:fs/promises';
 
 const ROLES=['hub','calendar','dispatch'];
 const ROUTES={hub:'/yxb/wis-marketing-hub/',
@@ -31,6 +31,43 @@ class TopologyError extends Error{constructor(code){super('Read-only topology NO
 const need=(ok,code)=>{if(!ok)throw new TopologyError(code);};
 const keys=(row,expected)=>object(row)&&same(Object.keys(row).sort(),[...expected].sort());
 const freeze=x=>{if(object(x)||Array.isArray(x)){Object.values(x).forEach(freeze);Object.freeze(x);}return x;};
+// Fixed proc metadata only. Never read cmdline, environ, fds or business data.
+async function readTextBounded(file,maxBytes){
+  const handle=await open(file,'r');
+  try{const buffer=Buffer.alloc(maxBytes+1);let length=0;
+    while(length<buffer.length){const {bytesRead}=await handle.read(buffer,length,buffer.length-length,null);if(!bytesRead)break;length+=bytesRead;}
+    need(length<=maxBytes,'kernel_metadata_oversize');return buffer.subarray(0,length).toString('utf8');
+  }finally{await handle.close();}
+}
+const KERNEL_FS=Object.freeze({readTextBounded,stat,readlink});
+const mountPath=x=>x==='/'||path(x);
+const deviceNumber=dev=>String(((dev>>8n)&0xfffn)|((dev>>32n)&~0xfffn))+':'+String((dev&0xffn)|((dev>>12n)&~0xffn));
+function mountInfo(raw){
+  need(typeof raw==='string'&&Buffer.byteLength(raw)<=1024*1024,'kernel_metadata_oversize');
+  const decode=x=>{need(!/\\(?!040|011|012|134)/u.test(x),'kernel_mountinfo_invalid');
+    return x.replace(/\\(040|011|012|134)/gu,(_,x)=>String.fromCharCode(parseInt(x,8)));};
+  const rows=raw.trim().split('\n').map(line=>{
+    const f=line.split(' '),split=f.indexOf('-');
+    need(split>=6&&f.length===split+4&&/^\d+$/u.test(f[0])&&/^\d+$/u.test(f[1])&&/^\d+:\d+$/u.test(f[2]),'kernel_mountinfo_invalid');
+    const root=decode(f[3]),destination=decode(f[4]),options=f[5].split(','),superOptions=f[split+3].split(',');
+    need(mountPath(root)&&mountPath(destination)&&options.includes('ro')!==options.includes('rw')&&
+      superOptions.includes('ro')!==superOptions.includes('rw'),'kernel_mountinfo_invalid');
+    return {id:f[0],parent:f[1],device:f[2],root,destination,rw:options.includes('rw')&&superOptions.includes('rw')};
+  });
+  need(rows.length>0&&rows.length<=10000&&new Set(rows.map(x=>x.id)).size===rows.length,'kernel_mountinfo_invalid');return rows;
+}
+function processStart(raw,pid){
+  need(typeof raw==='string'&&Buffer.byteLength(raw)<=16384&&raw.startsWith(String(pid)+' ('),'kernel_process_stat_invalid');
+  const end=raw.lastIndexOf(')'),fields=raw.slice(end+2).trim().split(/\s+/u);
+  need(end>0&&raw[end+1]===' '&&fields.length>=20&&/^[RSDZTWtXxIKP]$/u.test(fields[0])&&/^\d+$/u.test(fields[19]),'kernel_process_stat_invalid');return fields[19];
+}
+function statIdentity(value){
+  need(value&&typeof value.dev==='bigint'&&typeof value.ino==='bigint'&&value.dev>=0n&&value.ino>0n&&
+    typeof value.isDirectory==='function'&&typeof value.isFile==='function','kernel_stat_invalid');
+  const kind=value.isDirectory()?'directory':value.isFile()?'file':null;need(kind,'kernel_mount_kind_invalid');
+  return {device:deviceNumber(value.dev),dev:String(value.dev),ino:String(value.ino),kind};
+}
+const rootOverlap=(a,b)=>a==='/'||b==='/'||overlap(a,b);
 
 function validate(pin,policy){
   need(keys(pin,['network','gateway','services']),'pin_shape_invalid');
@@ -180,7 +217,7 @@ function narrow(container){
     return [k,{id:v.NetworkID,aliases:v.Aliases===null?[]:v.Aliases,ip:v.IPAddress}];
   }));
   return {id:container.Id,image:container.Image,name:container.Name,status:container.State.Status,
-    running:container.State.Running,startedAt:container.State.StartedAt,health:container.State.Health?.Status||null,
+    running:container.State.Running,pid:container.State.Pid,startedAt:container.State.StartedAt,health:container.State.Health?.Status||null,
     networks,
     mounts:mounts(container),restart:container.HostConfig.RestartPolicy?.Name||'no',
     portBindings:container.HostConfig.PortBindings||{}};
@@ -210,9 +247,11 @@ function verify(observed,pin,policy,at){
     need(c.mounts.every(m=>!overlap(m.destination,'/app/data')||m.destination==='/app/data'),'service_data_mount_shadowed');
     const physical=data.find(m=>m.source===p.dataMount.source)?.physicalSource;
     need(path(physical),'protected_mount_physical_path_missing');
-    const holders=containers.filter(x=>x.mounts.some(m=>m.rw&&
+    const protectedIdentity=data.find(m=>m.source===p.dataMount.source)?.sourceIdentity;
+    const holders=containers.filter(x=>x.kernelProtectedRw?.[role]||x.mounts.some(m=>m.rw&&
       (m.type==='volume'&&p.dataMount.type==='volume'&&m.name===p.dataMount.name||
-        m.physicalSource&&overlap(m.physicalSource,physical))));
+        m.physicalSource&&overlap(m.physicalSource,physical)||
+        m.sourceIdentity&&m.sourceIdentity.dev===protectedIdentity?.dev&&m.sourceIdentity.ino===protectedIdentity?.ino)));
     services[role]={id:c.id,image:c.image,name:p.name,alias:p.alias,status:c.status,health:c.health,
       startedAt:c.startedAt,dataMount:{...p.dataMount,rw:true},
       runningRwWriters:holders.filter(x=>x.running).map(x=>x.id).sort(),
@@ -234,8 +273,9 @@ function verify(observed,pin,policy,at){
 
 /** Returns readTopology({signal}?) with cancellation as its only input. Never
  * accepts a caller-supplied command, URL, container ID or file path. */
-export function createDockerTopologyReader({pin,policy,clock=Date.now,execFileImpl=execFile,fetchImpl=globalThis.fetch,realpathImpl=realpath}={}){
+export function createDockerTopologyReader({pin,policy,clock=Date.now,execFileImpl=execFile,fetchImpl=globalThis.fetch,realpathImpl=realpath,kernelFsImpl=KERNEL_FS}={}){
   need(typeof clock==='function'&&typeof execFileImpl==='function'&&typeof fetchImpl==='function'&&typeof realpathImpl==='function','transport_invalid');
+  need(keys(kernelFsImpl,['readTextBounded','stat','readlink'])&&Object.values(kernelFsImpl).every(x=>typeof x==='function'),'kernel_transport_invalid');
   validate(pin,policy);
   // Capture immutable independently passed inputs; later caller mutation
   // cannot silently repin a transport endpoint or an expected incarnation.
@@ -244,7 +284,7 @@ export function createDockerTopologyReader({pin,policy,clock=Date.now,execFileIm
     need(args.length<=1&&(args.length===0||args[0]===undefined||keys(args[0],[])||
       keys(args[0],['signal'])&&args[0].signal instanceof AbortSignal),'read_topology_arguments_forbidden');
     const external=args[0]?.signal;need(!external?.aborted,'topology_aborted');
-    need(execFileImpl!==execFile&&realpathImpl!==realpath||process.platform==='linux','release_host_linux_required');
+    need(execFileImpl!==execFile&&realpathImpl!==realpath&&kernelFsImpl!==KERNEL_FS||process.platform==='linux','release_host_linux_required');
     let previous=-Infinity;const now=()=>{const at=clock();need(Number.isFinite(at)&&at>=previous,'clock_invalid');previous=at;return at;};
     const start=now(),remaining=()=>{need(!external?.aborted,'topology_aborted');
       const left=TOTAL_MS-(now()-start);need(left>0,'topology_deadline');return Math.min(OP_MS,left);};
@@ -275,6 +315,62 @@ export function createDockerTopologyReader({pin,policy,clock=Date.now,execFileIm
       }
     };
     const json=raw=>{try{return JSON.parse(raw);}catch{throw new TopologyError('docker_json_invalid');}};
+    const metadata=async(operation,code)=>{
+      const allowance=remaining(),began=now();let result;
+      try{result=await operation();}catch(error){if(error instanceof TopologyError)throw error;throw new TopologyError(code);}
+      remaining();need(now()-began<=allowance,'kernel_metadata_timeout');return result;
+    };
+    const text=async(file,max)=>metadata(()=>kernelFsImpl.readTextBounded(file,max),'kernel_metadata_unavailable');
+    const kernelMounts=async rows=>{
+      const checkedAt=new Date(now()).toISOString();
+      const hostRaw=await text('/proc/self/mountinfo',1024*1024),host=mountInfo(hostRaw),sourceStats=new Map();
+      const sourceIdentity=async source=>{
+        if(sourceStats.has(source))return sourceStats.get(source);
+        const actual=statIdentity(await metadata(()=>kernelFsImpl.stat(source,{bigint:true}),'kernel_mount_source_unavailable'));
+        const matching=host.filter(x=>x.device===actual.device&&(x.destination==='/'||source===x.destination||source.startsWith(x.destination+'/')))
+          .sort((a,b)=>b.destination.length-a.destination.length);
+        need(matching.length>0&&!(matching.length>1&&matching[0].destination===matching[1].destination),'kernel_source_mount_ambiguous');
+        const h=matching[0],relative=source===h.destination?'':source.slice(h.destination==='/'?1:h.destination.length+1);
+        actual.filesystemRoot=((h.root==='/'?'':h.root)+(relative?'/'+relative:''))||'/';
+        sourceStats.set(source,actual);return actual;
+      };
+      const protectedSources={};for(const role of ROLES)protectedSources[role]=await sourceIdentity(pin.services[role].dataMount.source);
+      for(const c of rows){
+        for(const m of c.mounts)if(m.physicalSource)m.sourceIdentity=await sourceIdentity(m.physicalSource);
+        if(!c.running)continue;
+        need(Number.isSafeInteger(c.pid)&&c.pid>0&&c.pid<=2147483647,'kernel_pid_invalid');
+        const base='/proc/'+c.pid,readProcess=async()=>{
+          const startTicks=processStart(await text(base+'/stat',16384),c.pid);
+          const namespace=await metadata(()=>kernelFsImpl.readlink(base+'/ns/mnt'),'kernel_namespace_unavailable');
+          need(typeof namespace==='string'&&/^mnt:\[\d+\]$/u.test(namespace),'kernel_namespace_invalid');
+          const raw=await text(base+'/mountinfo',1024*1024);return {startTicks,namespace,raw};
+        };
+        const before=await readProcess(),actual=mountInfo(before.raw),mountProofs=[];
+        const declared=[...new Map(c.mounts.filter(m=>m.type!=='tmpfs').map(m=>[m.destination,m])).values()];
+        for(const m of declared){
+          need(m.sourceIdentity,'kernel_mount_source_missing');const candidates=actual.filter(x=>x.destination===m.destination);
+          need(candidates.length===1,'kernel_declared_mount_missing_or_shadowed');const observed=candidates[0];
+          need(observed.rw===m.rw&&observed.device===m.sourceIdentity.device&&observed.root===m.sourceIdentity.filesystemRoot,'kernel_declared_mount_drift');
+          const target=statIdentity(await metadata(()=>kernelFsImpl.stat(base+'/root'+m.destination,{bigint:true}),'kernel_mount_target_unavailable'));
+          need(target.dev===m.sourceIdentity.dev&&target.ino===m.sourceIdentity.ino&&target.kind===m.sourceIdentity.kind,'kernel_mount_identity_mismatch');
+          mountProofs.push({destination:m.destination,mountId:observed.id,...target,rw:observed.rw});
+        }
+        c.kernelProtectedRw=Object.fromEntries(ROLES.map(role=>[role,actual.some(x=>x.rw&&
+          x.device===protectedSources[role].device&&rootOverlap(x.root,protectedSources[role].filesystemRoot))||
+          mountProofs.some(x=>x.rw&&x.dev===protectedSources[role].dev&&x.ino===protectedSources[role].ino)]));
+        for(const role of ROLES)if(c.id===pin.services[role].id)
+          need(!actual.some(x=>x.destination.startsWith('/app/data/')),'kernel_protected_mount_shadowed');
+        const after=await readProcess();need(same(before,after),'kernel_process_or_mount_changed');
+        for(const m of declared){
+          const source=statIdentity(await metadata(()=>kernelFsImpl.stat(m.physicalSource,{bigint:true}),'kernel_mount_source_unavailable'));
+          const target=statIdentity(await metadata(()=>kernelFsImpl.stat(base+'/root'+m.destination,{bigint:true}),'kernel_mount_target_unavailable'));
+          need(source.dev===m.sourceIdentity.dev&&source.ino===m.sourceIdentity.ino&&same(source,target),'kernel_mount_identity_changed');
+        }
+        c.kernelIdentity={pid:c.pid,startTicks:before.startTicks,mountNamespace:before.namespace,
+          mountinfoSha256:digest(before.raw),mounts:mountProofs,checkedAt};
+      }
+      need(hostRaw===await text('/proc/self/mountinfo',1024*1024),'kernel_host_mount_changed');
+    };
     const collect=async()=>{
       const ids=(await docker(['ps','--all','--quiet','--no-trunc'])).trim().split(/\s+/u);
       need(ids.length>0&&ids.length<=1024&&ids.every(hex)&&new Set(ids).size===ids.length,'container_ids_invalid');ids.sort();
@@ -312,6 +408,7 @@ export function createDockerTopologyReader({pin,policy,clock=Date.now,execFileIm
         for(const a of c.mounts)for(const b of c.mounts)if(a.destination===b.destination&&a.physicalSource&&b.physicalSource)
           need(a.physicalSource===b.physicalSource,'mount_declaration_conflict');
       }
+      await kernelMounts(rows);
       const nets=json(await docker(['network','inspect',pin.network.id]));need(Array.isArray(nets)&&nets.length===1,'network_inspect_invalid');
       const config=await docker(['exec',pin.gateway.id,'nginx','-T']);
       const network=nets[0];
@@ -369,13 +466,16 @@ export function createDockerTopologyReader({pin,policy,clock=Date.now,execFileIm
     // Last inventory is the final read, after both health phases. Otherwise
     // a restart/mount change during the last probes would escape the CAS.
     const lastHealth=await checkHealth(first.observed),last=await collect();
-    const fingerprint=x=>digest(JSON.stringify({...x,config:digest(x.config)}));
+    const fingerprint=x=>digest(JSON.stringify({...x,config:digest(x.config),containers:x.containers.map(c=>
+      ({...c,...(c.kernelIdentity?{kernelIdentity:{...c.kernelIdentity,checkedAt:undefined}}:{})}))}));
     need(fingerprint(first.observed)===fingerprint(last.observed)&&same(firstHealth.hubIdentity,lastHealth.hubIdentity),'topology_changed_during_read');
     const finished=now();need(!external?.aborted,'topology_aborted');need(finished-start<=TOTAL_MS,'topology_deadline');
     for(const role of ROLES){
       const service=last.topology.services[role];service.topologyCheckedAt=service.checkedAt;
+      service.kernelMountIdentity=last.observed.containers.find(c=>c.id===service.id).kernelIdentity;
       service.healthProbes=lastHealth.proofs.filter(p=>p.role===role);
-      service.checkedAt=new Date(Math.min(Date.parse(service.checkedAt),...service.healthProbes.map(p=>Date.parse(p.checkedAt)))).toISOString();
+      service.checkedAt=new Date(Math.min(Date.parse(service.checkedAt),Date.parse(service.kernelMountIdentity.checkedAt),
+        ...service.healthProbes.map(p=>Date.parse(p.checkedAt)))).toISOString();
     }
     Object.assign(last.topology.services.hub,lastHealth.hubIdentity);
     last.topology.gateway.topologyCheckedAt=last.topology.gateway.checkedAt;

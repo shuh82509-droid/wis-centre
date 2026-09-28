@@ -6,16 +6,23 @@ import {createHash} from 'node:crypto';
 
 const sha=x=>createHash('sha256').update(JSON.stringify(x)).digest('hex');
 const dateAt=ms=>new Date(ms+8*3600000).toISOString().slice(0,10);
-const keyTopology=x=>{
+// Preserve kernel identity across the whole collection, not only inside one
+// topology GET. A new observation time is expected; a new PID/start tick,
+// namespace, mount table or source/target inode is not. This is still a
+// diagnostic projection, never an authorization or kernel lifetime proof.
+export const topologyIdentityProjection=x=>{
   const g=x?.gateway||{},service=key=>{const s=x?.services?.[key]||{};return {
     id:s.id,image:s.image,status:s.status,health:s.health,startedAt:s.startedAt,
     release:s.release,liveNextDayInstance:s.liveNextDayInstance,
     dataMount:s.dataMount,runningRwWriters:s.runningRwWriters,
-    dormantAutoRestartRw:s.dormantAutoRestartRw,dormantRwContainers:s.dormantRwContainers};};
-  return sha({gateway:{id:g.id,image:g.image,status:g.status,health:g.health,
+    dormantAutoRestartRw:s.dormantAutoRestartRw,dormantRwContainers:s.dormantRwContainers,
+    kernelMountIdentity:s.kernelMountIdentity&&Object.fromEntries(
+      Object.entries(s.kernelMountIdentity).filter(([key])=>key!=='checkedAt'))};};
+  return {gateway:{id:g.id,image:g.image,status:g.status,health:g.health,
     routes:g.routes,configHash:g.configHash},
-    services:Object.fromEntries(['hub','calendar','dispatch'].map(k=>[k,service(k)]))});
+    services:Object.fromEntries(['hub','calendar','dispatch'].map(k=>[k,service(k)]))};
 };
+const keyTopology=x=>sha(topologyIdentityProjection(x));
 const boundedIssue=e=>String(e?.code||e?.status||e?.name||'readback_failed').slice(0,60);
 const required=['readTopology','readOfficialSource','readApprovedBindings','readIdentity',
   'deriveRoomSlots','readHubState','readCardMessage','readPersonalChat','readPersonalPeer','cardMatches',

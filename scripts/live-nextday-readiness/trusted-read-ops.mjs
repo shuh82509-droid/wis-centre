@@ -1,6 +1,6 @@
 // Release-side concrete acceptance collection. This entry point has no signer,
 // permit installer, source sync, task write, message sender or OAuth refresh.
-import {collectReadOnlyEvidence} from './readiness-collector.mjs';
+import {collectReadOnlyEvidence, topologyIdentityProjection} from './readiness-collector.mjs';
 import {evaluateNextDayEvidence} from './readiness-core.mjs';
 import {loadTrustedInputs, readPinnedJson, freezeInput, digestBytes, digestJson, requireRead,
   validDigest} from './trusted-policy.mjs';
@@ -311,19 +311,8 @@ export async function createTrustedReadOps(inputPaths) {
       try {
         await runtime.verifyUnchanged();
         const last = await runtime.ops.readTopology();
-        const projection = value => {
-          const gateway = value?.gateway || {}, roles = ['hub', 'calendar', 'dispatch'];
-          return {gateway: {id: gateway.id, image: gateway.image, status: gateway.status,
-            health: gateway.health, routes: gateway.routes, configHash: gateway.configHash},
-          services: Object.fromEntries(roles.map(key => {
-            const role = value?.services?.[key] || {};
-            return [key, {id: role.id, image: role.image, status: role.status, health: role.health,
-              startedAt: role.startedAt, release: role.release, liveNextDayInstance: role.liveNextDayInstance,
-              dataMount: role.dataMount, runningRwWriters: role.runningRwWriters,
-              dormantAutoRestartRw: role.dormantAutoRestartRw, dormantRwContainers: role.dormantRwContainers}];
-          }))};
-        };
-        requireRead(same(projection(last), projection(evidence.environment)), 'final_topology_drift');
+        requireRead(same(topologyIdentityProjection(last), topologyIdentityProjection(evidence.environment)),
+          'final_topology_drift');
       } catch (error) {
         evidence.collectorIssues.push('trusted_final_read:' + (/^[a-z0-9_]{1,80}$/u.test(error?.code || '')
           ? error.code : 'trusted_final_read_failed'));

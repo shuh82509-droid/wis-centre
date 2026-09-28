@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {collectReadOnlyEvidence} from './readiness-collector.mjs';
+import {collectReadOnlyEvidence, topologyIdentityProjection} from './readiness-collector.mjs';
 
 const NOW=Date.parse('2026-09-27T07:45:00.000Z');
 const at=new Date(NOW).toISOString();
@@ -140,6 +140,36 @@ test('same-ID service restart or Hub release/instance change invalidates first/l
       policy:{groupId:'group',approvedGroupTestMessageId:'om_test'},now:NOW});
     assert.ok(result.collectorIssues.includes('topology_changed_during_collection'));
   }
+});
+
+const kernelIdentity=()=>({pid:1234,startTicks:'5678',mountNamespace:'mnt:[90210]',
+  mountinfoSha256:'a'.repeat(64),mounts:[{destination:'/app/data',dev:'64771',ino:'123'}],checkedAt:at});
+test('kernel process, namespace and mount drift survives whole-round topology projection',async()=>{
+  for(const role of ['hub','calendar','dispatch'])for(const mutate of [
+    value=>{value.pid++;},value=>{value.startTicks='new';},
+    value=>{value.mountNamespace='mnt:[90211]';},value=>{value.mountinfoSha256='b'.repeat(64);},
+    value=>{value.mounts[0].ino='456';},value=>{value.mounts[0].dev='64772';}]){
+    let calls=0;const result=await collectReadOnlyEvidence({ops:ops({readTopology:async()=>{
+      const value=topology();value.services[role].kernelMountIdentity=kernelIdentity();
+      if(++calls===2)mutate(value.services[role].kernelMountIdentity);return value;}}),
+      policy:{groupId:'group',approvedGroupTestMessageId:'om_test'},now:NOW});
+    assert.ok(result.collectorIssues.includes('topology_changed_during_collection'));
+  }
+});
+
+test('only kernel observation time is ignored, while disappearance is drift',async()=>{
+  for(const disappear of [false,true]){
+    let calls=0;const result=await collectReadOnlyEvidence({ops:ops({readTopology:async()=>{
+      const value=topology();value.services.hub.kernelMountIdentity=kernelIdentity();
+      if(++calls===2){if(disappear)delete value.services.hub.kernelMountIdentity;
+        else value.services.hub.kernelMountIdentity.checkedAt=new Date(NOW+1000).toISOString();}
+      return value;}}),policy:{groupId:'group',approvedGroupTestMessageId:'om_test'},now:NOW});
+    assert.equal(result.collectorIssues.includes('topology_changed_during_collection'),disappear);
+  }
+  const value=topology();value.services.hub.kernelMountIdentity=kernelIdentity();
+  const projected=topologyIdentityProjection(value).services.hub.kernelMountIdentity;
+  assert.equal(projected.checkedAt,undefined);assert.deepEqual(projected.mounts,[{destination:'/app/data',dev:'64771',ino:'123'}]);
+  assert.equal(value.services.hub.kernelMountIdentity.checkedAt,at);
 });
 test('the same backup GET preserves three separate role proofs and never fills missing evidence from policy',async()=>{
   let reads=0;const rows=backupRows();
