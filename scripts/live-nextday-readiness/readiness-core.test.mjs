@@ -6,24 +6,62 @@ import {evaluateNextDayEvidence} from './readiness-core.mjs';
 const sha=x=>createHash('sha256').update(JSON.stringify(x)).digest('hex');
 const NOW=Date.parse('2026-09-27T07:45:00.000Z'); // Shanghai 15:45
 const ISO=new Date(NOW-30000).toISOString();
+const STARTED='2026-09-27T07:00:00.000Z';
+const CURRENT_STARTED=new Date(NOW-20000).toISOString();
+const OA_ISO=new Date(NOW-10000).toISOString();
 const ROOM_CODES=['guanqi','brand_selection','youxuan','wangou'];
 const workbook='EuYqssm4WhNwAvtyybKcDdk1ned';
 const groupId='oc_3f92ef62d6160399ee823e74def199e6';
 const appId='cli_aa9c744d6ffa1cc4';
 const cid=(ch)=>ch.repeat(64),image=(ch)=>'sha256:'+ch.repeat(64);
 const clone=x=>structuredClone(x);
+// Explicit synthetic fixtures only; these hashes are not live OA/backup
+// artifacts, a deployment approval, or a trusted production adapter.
+const oaFixture=(policy,at,{actor,noticeId,messageId,taskId})=>{
+  policy.oaAcceptance={actorNumber:actor,cases:['module','old-action','old-record','personal'].map(kind=>({
+    kind,expectedModule:kind==='personal'?'workflow-engine':'live-room-management',
+    view:kind==='old-action'?'action':kind==='old-record'?'record':kind,
+    noticeId:kind.startsWith('old-')?noticeId:null,messageId:kind.startsWith('old-')?messageId:null,
+    taskId:kind.startsWith('old-')?taskId:null,recipient:kind.startsWith('old-')?actor:null,
+    linkSha256:sha(['synthetic-link',kind]),expectedProofSha256:sha(['synthetic-oa-proof',kind])}))};
+  return {authenticated:true,actorNumber:actor,hubId:policy.containers.hub.id,
+    hubImage:policy.containers.hub.image,release:policy.containers.hub.release,
+    liveNextDayInstance:policy.containers.hub.liveNextDayInstance,
+    capturedAt:at,checkedAt:at,cases:policy.oaAcceptance.cases.map(c=>({
+      kind:c.kind,authenticated:true,actorNumber:actor,hubId:policy.containers.hub.id,
+      hubImage:policy.containers.hub.image,noticeId:c.noticeId,messageId:c.messageId,
+      release:policy.containers.hub.release,liveNextDayInstance:policy.containers.hub.liveNextDayInstance,
+      taskId:c.taskId,recipient:c.recipient,view:c.view,linkSha256:c.linkSha256,
+      proofSha256:c.expectedProofSha256,observedModule:c.expectedModule,observedTaskId:c.taskId,
+      observedView:c.view,httpStatus:200,loginRedirect:false,rendered:true,
+      businessActionInvoked:false,readOnly:c.kind==='old-record',
+      observedScope:c.kind==='personal'?'self':null,observedActorNumber:actor,capturedAt:at,checkedAt:at}))};
+};
+const backupFixture=(policy,at)=>Object.fromEntries(['hub','calendar','dispatch'].map(key=>{
+  const manifest=sha(['synthetic-full-manifest',key]);return [key,{fullBackup:true,
+    stoppedWriter:true,verified:true,restoreProbePassed:true,sourceContainerId:policy.backupSources[key].id,
+    sourceImage:policy.backupSources[key].image,sourceStartedAt:policy.backupSources[key].startedAt,
+    sourceDataMount:policy.backupSources[key].dataMount,archiveSha256:sha(['synthetic-archive',key]),
+    sourceManifestSha256:manifest,restoredManifestSha256:manifest,
+    restoreProbeHash:sha(['synthetic-restore',key]),capturedAt:at,checkedAt:at}];
+}));
 
 function fixture(){
   const policy={expectedDate:'2026-09-28',workbook,groupId,botAppId:appId,
     approvedGroupTestMessageId:'om_group_test',
-    containers:{gateway:{id:cid('a'),image:image('1')},hub:{id:cid('b'),image:image('2')},
-      calendar:{id:cid('c'),image:image('3')},dispatch:{id:cid('d'),image:image('4')}},
+    containers:{gateway:{id:cid('a'),image:image('1')},hub:{id:cid('b'),image:image('2'),startedAt:CURRENT_STARTED,
+      release:'hub-synthetic-release',liveNextDayInstance:'boot-synthetic-instance'},
+      calendar:{id:cid('c'),image:image('3'),startedAt:CURRENT_STARTED},dispatch:{id:cid('d'),image:image('4'),startedAt:CURRENT_STARTED}},
     gatewayConfigHash:cid('e'),historicalUnknownHash:sha([]),
     dataMounts:{hub:'/data/hub',calendar:'/data/calendar',dispatch:'/data/dispatch'},
     approvedNumbers:ROOM_CODES.flatMap((_,i)=>[`N${i}a`,`N${i}b`])};
+  policy.backupSources=Object.fromEntries(['hub','calendar','dispatch'].map(key=>[key,{
+    id:policy.containers[key].id,image:policy.containers[key].image,startedAt:STARTED,dataMount:policy.dataMounts[key]}]));
   const service=(key)=>({id:policy.containers[key].id,image:policy.containers[key].image,
+    startedAt:policy.containers[key].startedAt,
+    ...(key==='hub'?{release:policy.containers.hub.release,liveNextDayInstance:policy.containers.hub.liveNextDayInstance}:{}),
     checkedAt:ISO,status:'running',health:'healthy',runningRwWriters:[policy.containers[key].id],
-    dormantAutoRestartRw:[],dataMount:{source:policy.dataMounts[key],rw:true}});
+    dormantAutoRestartRw:[],dormantRwContainers:[],dataMount:{source:policy.dataMounts[key],rw:true}});
   const slots=ROOM_CODES.map((code,i)=>({date:'2026-09-28',roomCode:code,key:`live:${code}:1`,
     signature:`signature-${code}`,startAt:`2026-09-28T0${i}:00:00.000Z`,
     endAt:`2026-09-28T0${i+1}:00:00.000Z`,anchor:`N${i}a`,
@@ -51,9 +89,8 @@ function fixture(){
     configHash:policy.gatewayConfigHash,routes:{hub:policy.containers.hub.id,
       calendar:policy.containers.calendar.id,dispatch:policy.containers.dispatch.id}},
     services:{hub:service('hub'),calendar:service('calendar'),dispatch:service('dispatch')},
-    backup:{hub:{stoppedWriter:true,verified:true,restoreProbePassed:true,checkedAt:ISO,
-      sourceContainerId:policy.containers.hub.id,sourceDataMount:policy.dataMounts.hub}},
-    oaReadback:{authenticated:true,hubId:policy.containers.hub.id,checkedAt:ISO}},
+    backup:backupFixture(policy,ISO),
+    oaReadback:oaFixture(policy,OA_ISO,{actor:'N0a',noticeId:'notice-0-0',messageId:'om_0_0',taskId:'task-0'})},
     source:{date:'2026-09-28',updatedAt:ISO,source:{mode:'official_live',verified:true,spreadsheetToken:workbook},
       issues:[],rooms:ROOM_CODES.map(code=>({code,anchors:[['08:00','09:00','演练']],assistants:[]})),
       sourceStatus:Object.fromEntries(ROOM_CODES.map((code,i)=>[code,{found:true,
@@ -87,7 +124,94 @@ test('gateway, image and writer drift fail closed',()=>{
   rejects(f=>{f.evidence.environment.services.hub.dormantAutoRestartRw.push(cid('f'));},
     'hub_writer_or_mount_unsafe');
   rejects(f=>{f.evidence.environment.backup.hub.verified=false;},
-    'current_stopped_writer_backup_unverified');
+    'current_hub_stopped_writer_backup_unverified');
+});
+test('all three exact data mounts must be independently pinned and all dormant RW writers isolated',()=>{
+  for(const key of ['hub','calendar','dispatch']){
+    for(const mount of [undefined,'','/','/data//hub','/data/hub/','/data/../escape','relative','/data/with space','/data/\u0000bad'])
+      rejects(f=>{f.policy.dataMounts[key]=mount;f.evidence.environment.services[key].dataMount.source=mount;},
+        'data_mount_baseline_not_pinned');
+    rejects(f=>{delete f.evidence.environment.services[key].dormantRwContainers;},`${key}_writer_or_mount_unsafe`);
+    rejects(f=>{f.evidence.environment.services[key].dormantRwContainers.push({id:cid('f'),restart:'no'});},
+      `${key}_writer_or_mount_unsafe`);
+  }
+});
+test('fresh stopped-source backup followed by same-container restart or pinned replacement is valid',()=>{
+  const sameContainer=fixture();assert.equal(run(sameContainer).checksPassed,true);
+  for(const key of ['hub','calendar','dispatch']){
+    const f=fixture(),old=f.policy.backupSources[key],current=f.policy.containers[key];
+    assert.equal(old.id,current.id);assert.ok(Date.parse(old.startedAt)<Date.parse(f.evidence.environment.backup[key].capturedAt));
+    assert.ok(Date.parse(f.evidence.environment.backup[key].capturedAt)<Date.parse(current.startedAt));
+    // Replacement is independently pinned to the old stopped source, while
+    // current gateway/health/writer CAS remains the new container identity.
+    old.id=cid('f');old.image=image('f');
+    f.evidence.environment.backup[key].sourceContainerId=old.id;
+    f.evidence.environment.backup[key].sourceImage=old.image;
+    assert.equal(run(f).checksPassed,true);
+    rejects(x=>{delete x.policy.backupSources[key];},'backup_source_baseline_not_pinned');
+    rejects(x=>{x.evidence.environment.backup[key].sourceStartedAt=CURRENT_STARTED;},`current_${key}_stopped_writer_backup_unverified`);
+    rejects(x=>{x.evidence.environment.backup[key].sourceImage=image('f');},`current_${key}_stopped_writer_backup_unverified`);
+    rejects(x=>{x.evidence.environment.backup[key].capturedAt=OA_ISO;},`current_${key}_stopped_writer_backup_unverified`);
+    rejects(x=>{x.policy.backupSources[key].image=image('f');},'backup_source_baseline_not_pinned');
+  }
+});
+test('same container ID and image cannot disguise a restarted service or Hub process',()=>{
+  for(const key of ['hub','calendar','dispatch']){
+    rejects(f=>{delete f.policy.containers[key].startedAt;},'runtime_instance_baseline_not_pinned');
+    rejects(f=>{delete f.evidence.environment.services[key].startedAt;},`${key}_started_at_drift`);
+    rejects(f=>{f.evidence.environment.services[key].startedAt=ISO;},`${key}_started_at_drift`);
+    rejects(f=>{f.evidence.environment.backup[key].sourceStartedAt=ISO;},`current_${key}_stopped_writer_backup_unverified`);
+  }
+  for(const field of ['release','liveNextDayInstance']){
+    rejects(f=>{f.policy.containers.hub[field]='local';},'runtime_instance_baseline_not_pinned');
+    rejects(f=>{f.evidence.environment.services.hub[field]='different-process';},'hub_process_instance_drift');
+    rejects(f=>{f.evidence.environment.oaReadback[field]='different-process';},'real_oa_page_unverified');
+    rejects(f=>{f.evidence.environment.oaReadback.cases[1][field]='different-process';},'oa_old_action_acceptance_unverified');
+  }
+});
+test('each service needs its current stopped full backup and matching restored manifest, never Hub-only proof',()=>{
+  for(const key of ['hub','calendar','dispatch']){
+    for(const change of [
+      row=>{row.fullBackup=false;},row=>{row.stoppedWriter=false;},row=>{row.verified=false;},
+      row=>{row.restoreProbePassed=false;},row=>{row.sourceContainerId=cid('f');},
+      row=>{row.sourceDataMount='/wrong';},row=>{row.archiveSha256='bad';},
+      row=>{row.sourceManifestSha256=undefined;},row=>{row.restoredManifestSha256=cid('f');},
+      row=>{row.restoreProbeHash='bad';},row=>{row.capturedAt=new Date(NOW-120001).toISOString();},
+      row=>{row.checkedAt=new Date(NOW-120001).toISOString();},
+      row=>{row.capturedAt=new Date(NOW+1).toISOString();},
+      row=>{row.checkedAt=new Date(NOW-60000).toISOString();},
+    ])rejects(f=>change(f.evidence.environment.backup[key]),`current_${key}_stopped_writer_backup_unverified`);
+    rejects(f=>{delete f.evidence.environment.backup[key];},`current_${key}_stopped_writer_backup_unverified`);
+  }
+});
+test('a legacy OA login boolean or oldLinksAccepted flag cannot replace independently pinned rendered cases',()=>{
+  rejects(f=>{delete f.policy.oaAcceptance;},'oa_acceptance_policy_not_pinned');
+  rejects(f=>{f.evidence.environment.oaReadback={authenticated:true,hubId:f.policy.containers.hub.id,
+    checkedAt:ISO,oldLinksAccepted:true};},'real_oa_page_unverified');
+  rejects(f=>{f.evidence.environment.oaReadback.cases.pop();},'oa_acceptance_cases_incomplete');
+  rejects(f=>{f.policy.oaAcceptance.cases[1].expectedProofSha256='';},'oa_acceptance_policy_not_pinned');
+});
+test('old action/record and personal pages bind exact approved proof, actor, notice, link and observed route',()=>{
+  for(const kind of ['module','old-action','old-record','personal']){
+    const issue=`oa_${kind.replaceAll('-','_')}_acceptance_unverified`;
+    for(const change of [row=>{row.actorNumber='other';},row=>{row.hubId=cid('f');},
+      row=>{row.hubImage=image('f');},row=>{row.authenticated=false;},
+      row=>{row.proofSha256=cid('f');},row=>{row.linkSha256=cid('f');},
+      row=>{row.observedModule='unrelated';},row=>{row.observedTaskId='other';},
+      row=>{row.observedView='other';},row=>{row.httpStatus=401;},row=>{row.loginRedirect=true;},
+      row=>{row.rendered=false;},row=>{row.businessActionInvoked=true;},
+      row=>{row.capturedAt=new Date(NOW-120001).toISOString();},
+      row=>{row.checkedAt=new Date(NOW-120001).toISOString();}])
+      rejects(f=>change(f.evidence.environment.oaReadback.cases.find(x=>x.kind===kind)),issue);
+    if(kind.startsWith('old-')){
+      for(const change of [row=>{row.noticeId='other';},row=>{row.messageId='om_other';},
+        row=>{row.taskId='other';},row=>{row.recipient='other';},row=>{row.readOnly=kind!=='old-record';}])
+        rejects(f=>change(f.evidence.environment.oaReadback.cases.find(x=>x.kind===kind)),issue);
+      rejects(f=>{f.evidence.state.notifications[0].recipient='other';},issue);
+    }
+  }
+  rejects(f=>{f.evidence.environment.oaReadback.cases[3].observedScope='all';},'oa_personal_acceptance_unverified');
+  rejects(f=>{f.evidence.environment.oaReadback.cases[3].observedActorNumber='other';},'oa_personal_acceptance_unverified');
 });
 test('source version, missing room and stale read all fail closed',()=>{
   rejects(f=>{f.evidence.source.sourceStatus.wangou.revision++;},'official_revision_or_sheet_drift');

@@ -7,7 +7,16 @@ const at=new Date(NOW).toISOString();
 const rooms=['guanqi','brand_selection','youxuan','wangou'].map(code=>({code,anchors:[]}));
 const topology=()=>({gateway:{id:'g',image:'i',status:'running',health:'healthy',
   configHash:'hash',routes:{hub:'h',calendar:'c',dispatch:'d'},checkedAt:at},
-  services:{hub:{id:'h',checkedAt:at},calendar:{id:'c',checkedAt:at},dispatch:{id:'d',checkedAt:at}}});
+  services:{hub:{id:'h',checkedAt:at,dormantRwContainers:[],startedAt:at,
+    release:'hub-synthetic-release',liveNextDayInstance:'boot-synthetic-instance'},
+    calendar:{id:'c',checkedAt:at,dormantRwContainers:[],startedAt:at},
+    dispatch:{id:'d',checkedAt:at,dormantRwContainers:[],startedAt:at}}});
+const backupRows=()=>Object.fromEntries(['hub','calendar','dispatch'].map(key=>[key,{
+  fullBackup:true,stoppedWriter:true,verified:true,restoreProbePassed:true,
+  sourceContainerId:{hub:'h',calendar:'c',dispatch:'d'}[key],sourceDataMount:'/data/'+key,
+  sourceImage:'sha256:'+'d'.repeat(64),sourceStartedAt:at,
+  archiveSha256:'a'.repeat(64),sourceManifestSha256:'b'.repeat(64),restoredManifestSha256:'b'.repeat(64),
+  restoreProbeHash:'c'.repeat(64),capturedAt:at,checkedAt:at}]));
 function ops(overrides={}){
   return {readTopology:async()=>topology(),
     readOfficialSource:async(date)=>({date,rooms,issues:[],updatedAt:at}),
@@ -19,7 +28,7 @@ function ops(overrides={}){
       checkedAs:'bot',checkedAt:at}),
     readPersonalPeer:async()=>null,cardMatches:async()=>false,
     readGroup:async()=>({id:'group',checkedAt:at}),readGroupTest:async()=>null,
-    readBackup:async()=>null,readOaPage:async()=>null,...overrides};
+    readBackup:async()=>backupRows(),readOaPage:async()=>null,...overrides};
 }
 const cardState=count=>({tasks:Array.from({length:count},(_,i)=>({id:'task-'+i,
   workflow:'04',runtime:{state:'running',liveSession:{date:'2026-09-28'},nodes:[]}})),
@@ -114,6 +123,47 @@ test('current gateway or writer drift during collection invalidates the snapshot
     count++;const t=topology();if(count===2)t.gateway.routes.hub='other';return t;}}),
     policy:{groupId:'group'},now:NOW});
   assert.ok(result.collectorIssues.includes('topology_changed_during_collection'));
+});
+test('even a stopped restart=no same-volume RW container changes the topology gate',async()=>{
+  for(const key of ['hub','calendar','dispatch']){
+    let calls=0;const result=await collectReadOnlyEvidence({ops:ops({readTopology:async()=>{
+      const value=topology();if(++calls===2)value.services[key].dormantRwContainers.push({id:'old',restart:'no'});
+      return value;}}),policy:{groupId:'group',approvedGroupTestMessageId:'om_test'},now:NOW});
+    assert.ok(result.collectorIssues.includes('topology_changed_during_collection'));
+  }
+});
+test('same-ID service restart or Hub release/instance change invalidates first/last collection',async()=>{
+  for(const [key,field] of [['hub','startedAt'],['calendar','startedAt'],['dispatch','startedAt'],
+    ['hub','release'],['hub','liveNextDayInstance']]){
+    let calls=0;const result=await collectReadOnlyEvidence({ops:ops({readTopology:async()=>{
+      const value=topology();if(++calls===2)value.services[key][field]='changed';return value;}}),
+      policy:{groupId:'group',approvedGroupTestMessageId:'om_test'},now:NOW});
+    assert.ok(result.collectorIssues.includes('topology_changed_during_collection'));
+  }
+});
+test('the same backup GET preserves three separate role proofs and never fills missing evidence from policy',async()=>{
+  let reads=0;const rows=backupRows();
+  const result=await collectReadOnlyEvidence({ops:ops({readBackup:async first=>{
+    reads++;assert.equal(first.services.hub.id,'h');return rows;}}),
+    policy:{groupId:'group',approvedGroupTestMessageId:'om_test',dataMounts:{calendar:'/invented'}},now:NOW});
+  assert.equal(reads,1);assert.deepEqual(result.environment.backup,rows);
+  for(const key of ['hub','calendar','dispatch'])assert.equal(result.environment.backup[key].sourceDataMount,'/data/'+key);
+  for(const key of ['hub','calendar','dispatch']){
+    const missing=backupRows();delete missing[key];
+    const incomplete=await collectReadOnlyEvidence({ops:ops({readBackup:async()=>missing}),
+      policy:{groupId:'group',approvedGroupTestMessageId:'om_test'},now:NOW});
+    assert.ok(incomplete.collectorIssues.includes(`stopped_writer_backup_${key}_missing`));
+    assert.equal(incomplete.environment.backup[key],null);
+    assert.ok(incomplete.environment.backup[['hub','calendar','dispatch'].find(x=>x!==key)]);
+  }
+});
+test('one failed aggregate backup read remains explicit for all services without another read',async()=>{
+  let reads=0;const result=await collectReadOnlyEvidence({ops:ops({readBackup:async()=>{
+    reads++;throw {code:'backup_read_failed'};}}),
+    policy:{groupId:'group',approvedGroupTestMessageId:'om_test'},now:NOW});
+  assert.equal(reads,1);assert.deepEqual(result.environment.backup,{hub:null,calendar:null,dispatch:null});
+  assert.deepEqual(result.collectorIssues,['stopped_writer_backup:backup_read_failed',
+    'stopped_writer_backup_hub_missing','stopped_writer_backup_calendar_missing','stopped_writer_backup_dispatch_missing']);
 });
 
 test('missing read adapter rejects before any external operation',async()=>{

@@ -110,7 +110,11 @@ function requireCompleteReleasePreflight(manifest,evidence,now,mode,policy){
   requireFact(result.checksPassed&&result.date===manifest.businessDate&&
     result.sourceRevision===manifest.sourceRevision&&
     result.expectedCards===manifest.refs.length&&
-    policy.botAppId===evidence.botAppId&&policy.groupId===manifest.groupChatId,
+    policy.botAppId===evidence.botAppId&&policy.groupId===manifest.groupChatId&&
+    manifest.releaseId===policy.containers?.hub?.release&&
+    manifest.bootId===policy.containers?.hub?.liveNextDayInstance&&
+    manifest.releaseId===readback.environment?.services?.hub?.release&&
+    manifest.bootId===readback.environment?.services?.hub?.liveNextDayInstance,
   '完整独立预检或当前版本未通过，禁止签发次日许可',409);
   const source=readback.source,rooms=source.rooms,status=source.sourceStatus;
   const exactSource={workbook:WORKBOOK,revision:manifest.sourceRevision,

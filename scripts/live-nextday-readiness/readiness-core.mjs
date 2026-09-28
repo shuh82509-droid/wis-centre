@@ -15,6 +15,15 @@ const unique=(rows,key)=>new Set(rows.map(key)).size===rows.length;
 const validMessage=id=>/^om_[A-Za-z0-9_-]+$/u.test(id||'');
 const validOpenId=id=>/^ou_[a-z0-9]+$/u.test(id||'');
 const object=value=>value&&typeof value==='object'&&!Array.isArray(value);
+const validHash=value=>typeof value==='string'&&/^[a-f0-9]{64}$/u.test(value);
+const safeMount=value=>typeof value==='string'&&value.startsWith('/')&&value.length>1&&value.length<=1000&&
+  !value.endsWith('/')&&!value.includes('//')&&!/[\u0000-\u0020\u007f\\]/u.test(value)&&
+  !value.split('/').some(part=>part==='.'||part==='..');
+const nonempty=value=>typeof value==='string'&&value.length>0&&value.length<=200;
+const startedAt=(value,now)=>typeof value==='string'&&/^20\d{2}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,9})?Z$/u.test(value)&&
+  Number.isFinite(Date.parse(value))&&Date.parse(value)<=now;
+const runtimeIdentity=value=>typeof value==='string'&&/^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/u.test(value)&&value!=='local';
+const OA_CASES=['module','old-action','old-record','personal'];
 
 export function evaluateNextDayEvidence(evidence,{now=Date.now(),mode='preview',policy}={}){
   if(!['preview','activation','renewal'].includes(mode))throw new Error('Unsupported preflight mode');
@@ -32,6 +41,22 @@ export function evaluateNextDayEvidence(evidence,{now=Date.now(),mode='preview',
   need(object(policy?.containers)&&['gateway','hub','calendar','dispatch'].every(k=>
     /^[a-f0-9]{64}$/u.test(policy.containers[k]?.id||'')&&
     /^sha256:[a-f0-9]{64}$/u.test(policy.containers[k]?.image||'')),'container_baseline_not_pinned');
+  need(object(policy?.dataMounts)&&['hub','calendar','dispatch'].every(k=>
+    safeMount(policy.dataMounts[k])),'data_mount_baseline_not_pinned');
+  need(['hub','calendar','dispatch'].every(k=>startedAt(policy?.containers?.[k]?.startedAt,now))&&
+    runtimeIdentity(policy?.containers?.hub?.release)&&
+    runtimeIdentity(policy?.containers?.hub?.liveNextDayInstance),'runtime_instance_baseline_not_pinned');
+  // The stopped backup source is a different incarnation from the running
+  // CAS target, even for docker start on the same container ID. Replacement
+  // is allowed only when its prior source identity/image/mount are separately
+  // pinned; no current-container or evidence fallback may invent that source.
+  need(object(policy?.backupSources)&&['hub','calendar','dispatch'].every(key=>{
+    const source=policy.backupSources[key],current=policy?.containers?.[key];
+    return /^[a-f0-9]{64}$/u.test(source?.id||'')&&/^sha256:[a-f0-9]{64}$/u.test(source?.image||'')&&
+      startedAt(source?.startedAt,now)&&Date.parse(source.startedAt)<Date.parse(current?.startedAt)&&
+      safeMount(source?.dataMount)&&source.dataMount===policy?.dataMounts?.[key]&&
+      (source.id!==current?.id||source.image===current.image);
+  }),'backup_source_baseline_not_pinned');
   need(/^[a-f0-9]{64}$/u.test(policy?.historicalUnknownHash||''),'unknown_baseline_not_pinned');
   need(Array.isArray(policy?.approvedNumbers)&&unique(policy.approvedNumbers,x=>x)&&
     policy.approvedNumbers.length>0,'personnel_scope_not_pinned');
@@ -47,7 +72,12 @@ export function evaluateNextDayEvidence(evidence,{now=Date.now(),mode='preview',
     need(actual?.id===expected?.id&&actual?.image===expected?.image&&
       actual?.status==='running'&&actual?.health==='healthy'&&ageValid(actual?.checkedAt,now),
     `${key}_cas_or_health_invalid`);
+    if(key!=='gateway')need(startedAt(actual?.startedAt,now)&&actual.startedAt===expected?.startedAt,
+      `${key}_started_at_drift`);
   }
+  need(runtimeIdentity(services.hub?.release)&&runtimeIdentity(services.hub?.liveNextDayInstance)&&
+    services.hub.release===policy?.containers?.hub?.release&&
+    services.hub.liveNextDayInstance===policy?.containers?.hub?.liveNextDayInstance,'hub_process_instance_drift');
   need(gateway?.routes?.hub===services.hub?.id&&
     gateway?.routes?.calendar===services.calendar?.id&&
     gateway?.routes?.dispatch===services.dispatch?.id&&
@@ -57,16 +87,75 @@ export function evaluateNextDayEvidence(evidence,{now=Date.now(),mode='preview',
     const x=services[key];
     need(Array.isArray(x?.runningRwWriters)&&same(x.runningRwWriters,[x.id])&&
       Array.isArray(x?.dormantAutoRestartRw)&&x.dormantAutoRestartRw.length===0&&
-      x?.dataMount?.rw===true&&x.dataMount.source===policy?.dataMounts?.[key],
+      Array.isArray(x?.dormantRwContainers)&&x.dormantRwContainers.length===0&&
+      x?.dataMount?.rw===true&&safeMount(policy?.dataMounts?.[key])&&
+      x.dataMount.source===policy.dataMounts[key],
     `${key}_writer_or_mount_unsafe`);
   }
-  need(env.backup?.hub?.stoppedWriter===true&&env.backup.hub.verified===true&&
-    env.backup.hub.restoreProbePassed===true&&
-    env.backup.hub.sourceContainerId===services.hub?.id&&
-    env.backup.hub.sourceDataMount===services.hub?.dataMount?.source&&
-    ageValid(env.backup.hub.checkedAt,now),'current_stopped_writer_backup_unverified');
-  need(env.oaReadback?.authenticated===true&&env.oaReadback?.hubId===services.hub?.id&&
-    ageValid(env.oaReadback.checkedAt,now),'real_oa_page_unverified');
+  for(const key of ['hub','calendar','dispatch']){
+    const row=env.backup?.[key],source=policy?.backupSources?.[key];
+    need(object(row)&&row.fullBackup===true&&row.stoppedWriter===true&&row.verified===true&&
+      row.restoreProbePassed===true&&row.sourceContainerId===source?.id&&row.sourceImage===source?.image&&
+      row.sourceStartedAt===source?.startedAt&&startedAt(row.sourceStartedAt,now)&&
+      safeMount(policy?.dataMounts?.[key])&&
+      row.sourceDataMount===source?.dataMount&&row.sourceDataMount===policy.dataMounts[key]&&
+      row.sourceDataMount===services[key]?.dataMount?.source&&
+      validHash(row.archiveSha256)&&validHash(row.sourceManifestSha256)&&
+      row.restoredManifestSha256===row.sourceManifestSha256&&validHash(row.restoreProbeHash)&&
+      ageValid(row.capturedAt,now)&&ageValid(row.checkedAt,now)&&
+      Date.parse(row.sourceStartedAt)<=Date.parse(row.capturedAt)&&
+      Date.parse(row.capturedAt)<=Date.parse(services[key]?.startedAt)&&
+      Date.parse(row.capturedAt)<=Date.parse(row.checkedAt),
+    `current_${key}_stopped_writer_backup_unverified`);
+  }
+  // These cases are independently approved inputs, not booleans inferred
+  // from a login cookie or invented by the collector. The proof artifact hash
+  // must already be pinned outside the readback before a release can sign.
+  const oaPolicy=policy?.oaAcceptance,oa=env.oaReadback||{},cases=oaPolicy?.cases;
+  const oaPinned=need(object(oaPolicy)&&nonempty(oaPolicy.actorNumber)&&
+    Array.isArray(cases)&&cases.length===OA_CASES.length&&unique(cases,x=>x?.kind)&&
+    OA_CASES.every(kind=>cases.some(x=>x?.kind===kind))&&cases.every(x=>
+      nonempty(x?.expectedModule)&&nonempty(x?.view)&&validHash(x?.linkSha256)&&
+      validHash(x?.expectedProofSha256)&&
+      (['old-action','old-record'].includes(x.kind)?
+        nonempty(x.noticeId)&&validMessage(x.messageId)&&nonempty(x.taskId)&&
+        x.recipient===oaPolicy.actorNumber&&x.view===(x.kind==='old-record'?'record':'action'):
+        x.noticeId===null&&x.messageId===null&&x.taskId===null&&
+        x.view===(x.kind==='personal'?'personal':'module'))),
+  'oa_acceptance_policy_not_pinned');
+  need(oaPinned&&oa.authenticated===true&&oa.actorNumber===oaPolicy.actorNumber&&
+    oa.hubId===services.hub?.id&&oa.hubImage===services.hub?.image&&
+    oa.release===services.hub?.release&&oa.liveNextDayInstance===services.hub?.liveNextDayInstance&&
+    ageValid(oa.capturedAt,now)&&ageValid(oa.checkedAt,now)&&
+    Date.parse(services.hub?.startedAt)<=Date.parse(oa.capturedAt)&&
+    Date.parse(oa.capturedAt)<=Date.parse(oa.checkedAt),'real_oa_page_unverified');
+  const oaRows=Array.isArray(oa.cases)?oa.cases:[];
+  need(oaRows.length===OA_CASES.length&&unique(oaRows,x=>x?.kind),
+    'oa_acceptance_cases_incomplete');
+  for(const kind of OA_CASES){
+    const expected=Array.isArray(cases)?cases.find(x=>x?.kind===kind):null;
+    const row=oaRows.find(x=>x?.kind===kind),old=['old-action','old-record'].includes(kind);
+    const notice=old?(evidence?.state?.notifications||[]).find(x=>x.id===expected?.noticeId):null;
+    const task=old?(evidence?.state?.tasks||[]).find(x=>x.id===expected?.taskId):null;
+    need(oaPinned&&row?.authenticated===true&&row.actorNumber===oaPolicy.actorNumber&&
+      row.hubId===services.hub?.id&&row.hubImage===services.hub?.image&&
+      row.release===services.hub?.release&&row.liveNextDayInstance===services.hub?.liveNextDayInstance&&
+      row.linkSha256===expected?.linkSha256&&row.proofSha256===expected?.expectedProofSha256&&
+      row.noticeId===expected?.noticeId&&row.messageId===expected?.messageId&&
+      row.taskId===expected?.taskId&&row.view===expected?.view&&
+      row.observedModule===expected?.expectedModule&&row.observedTaskId===expected?.taskId&&
+      row.observedView===expected?.view&&row.httpStatus===200&&row.loginRedirect===false&&
+      row.rendered===true&&row.businessActionInvoked===false&&
+      ageValid(row.capturedAt,now)&&ageValid(row.checkedAt,now)&&
+      Date.parse(services.hub?.startedAt)<=Date.parse(row.capturedAt)&&
+      Date.parse(row.capturedAt)<=Date.parse(row.checkedAt)&&
+      (old?notice?.state==='sent'&&notice.messageId===expected.messageId&&
+        notice.taskId===expected.taskId&&notice.recipient===oaPolicy.actorNumber&&
+        row.recipient===notice.recipient&&task?.workflow==='04'&&object(task.liveSession)&&
+        row.readOnly===(kind==='old-record'):
+        kind!=='personal'||row.observedScope==='self'&&row.observedActorNumber===oaPolicy.actorNumber),
+    `oa_${kind.replaceAll('-','_')}_acceptance_unverified`);
+  }
 
   const source=evidence?.source||{},status=source.sourceStatus||{};
   need(source.date===date&&source.source?.mode==='official_live'&&

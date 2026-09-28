@@ -5,6 +5,7 @@ import {scheduleSessions} from './live-session-flow.mjs';
 import {currentNodeNotice} from './flow-notice-validity.mjs';
 import {FlowFeishu} from './flow-feishu.mjs';
 import {FlowRuntime} from './flow-runtime.mjs';
+import {evaluateNextDayEvidence} from './scripts/live-nextday-readiness/readiness-core.mjs';
 import {NEXT_DAY_PERMIT_MOUNT,isolatedNextDayPermitPath,nextDayReleaseManifest,installNextDayReleasePermit,
   readNextDayReleasePermit,createNextDayReleaseReader,currentNextDayRelease} from './live-next-day-release.mjs';
 import {chmodSync,existsSync,mkdirSync,mkdtempSync,readFileSync,readdirSync,statSync,unlinkSync,rmdirSync,writeFileSync} from 'node:fs';
@@ -69,21 +70,61 @@ const permitTestDirectory=prefix=>{
   return dir;
 };
 const sha=x=>createHash('sha256').update(JSON.stringify(x)).digest('hex');
-const releaseReadiness=(f,checkedAt)=>{
+// Synthetic full backup/OA artifacts are explicit test inputs only. They are
+// not real restored archives, browser acceptance, or operator approval.
+const releaseBackupFixture=(policy,capturedAt,checkedAt)=>Object.fromEntries(['hub','calendar','dispatch'].map(key=>{
+  const manifest=sha(['synthetic-full-manifest',key]);return [key,{fullBackup:true,
+    stoppedWriter:true,verified:true,restoreProbePassed:true,sourceContainerId:policy.backupSources[key].id,
+    sourceImage:policy.backupSources[key].image,sourceStartedAt:policy.backupSources[key].startedAt,
+    sourceDataMount:policy.backupSources[key].dataMount,archiveSha256:sha(['synthetic-archive',key]),
+    sourceManifestSha256:manifest,restoredManifestSha256:manifest,
+    restoreProbeHash:sha(['synthetic-restore',key]),capturedAt,checkedAt}];
+}));
+const releaseOaFixture=(policy,iso)=>{
+  policy.oaAcceptance={actorNumber:'A',cases:['module','old-action','old-record','personal'].map(kind=>({
+    kind,expectedModule:kind==='personal'?'workflow-engine':'live-room-management',
+    view:kind==='old-action'?'action':kind==='old-record'?'record':kind,
+    noticeId:kind.startsWith('old-')?'card-0':null,messageId:kind.startsWith('old-')?'om_card_0':null,
+    taskId:kind.startsWith('old-')?'T1':null,recipient:kind.startsWith('old-')?'A':null,
+    linkSha256:sha(['synthetic-link',kind]),expectedProofSha256:sha(['synthetic-oa-proof',kind])}))};
+  return {authenticated:true,actorNumber:'A',hubId:policy.containers.hub.id,
+    hubImage:policy.containers.hub.image,release:policy.containers.hub.release,
+    liveNextDayInstance:policy.containers.hub.liveNextDayInstance,
+    capturedAt:iso,checkedAt:iso,cases:policy.oaAcceptance.cases.map(c=>({
+      kind:c.kind,authenticated:true,actorNumber:'A',hubId:policy.containers.hub.id,
+      hubImage:policy.containers.hub.image,noticeId:c.noticeId,messageId:c.messageId,
+      release:policy.containers.hub.release,liveNextDayInstance:policy.containers.hub.liveNextDayInstance,
+      taskId:c.taskId,recipient:c.recipient,view:c.view,linkSha256:c.linkSha256,
+      proofSha256:c.expectedProofSha256,observedModule:c.expectedModule,observedTaskId:c.taskId,
+      observedView:c.view,httpStatus:200,loginRedirect:false,rendered:true,
+      businessActionInvoked:false,readOnly:c.kind==='old-record',
+      observedScope:c.kind==='personal'?'self':null,observedActorNumber:'A',capturedAt:iso,checkedAt:iso}))};
+};
+const releaseReadiness=(f,checkedAt,syntheticTimeline={})=>{
   const iso=new Date(checkedAt).toISOString(),cid=letter=>letter.repeat(64);
+  // Rechecking an archive never rewrites its real capture time. The optional
+  // explicit synthetic chronology is used only to exercise atomic-age gates.
+  const captureIso=syntheticTimeline.backupCapturedAt||new Date(firstActivationAt-2000).toISOString();
+  const currentStarted=syntheticTimeline.currentStartedAt||'2026-09-24T07:53:59.000Z';
   const appId='cli_testbot1234',groupId=f.manifest.groupChatId;
   const policy={expectedDate:f.manifest.businessDate,workbook:f.raw.source.spreadsheetToken,
     groupId,botAppId:appId,approvedGroupTestMessageId:'om_group_test',
     containers:{gateway:{id:cid('a'),image:'sha256:'+cid('1')},
-      hub:{id:cid('b'),image:'sha256:'+cid('2')},
-      calendar:{id:cid('c'),image:'sha256:'+cid('3')},
-      dispatch:{id:cid('d'),image:'sha256:'+cid('4')}},
+      hub:{id:cid('b'),image:'sha256:'+cid('2'),startedAt:currentStarted,
+        release:f.manifest.releaseId,liveNextDayInstance:f.manifest.bootId},
+      calendar:{id:cid('c'),image:'sha256:'+cid('3'),startedAt:currentStarted},
+      dispatch:{id:cid('d'),image:'sha256:'+cid('4'),startedAt:currentStarted}},
     gatewayConfigHash:cid('e'),historicalUnknownHash:sha([]),
     dataMounts:{hub:'/data/hub',calendar:'/data/calendar',dispatch:'/data/dispatch'},
     approvedNumbers:['A','B']};
+  policy.backupSources=Object.fromEntries(['hub','calendar','dispatch'].map(key=>[key,{
+    id:policy.containers[key].id,image:policy.containers[key].image,
+    startedAt:'2026-09-24T07:00:00.000Z',dataMount:policy.dataMounts[key]}]));
   const service=key=>({id:policy.containers[key].id,image:policy.containers[key].image,
+    startedAt:policy.containers[key].startedAt,
+    ...(key==='hub'?{release:policy.containers.hub.release,liveNextDayInstance:policy.containers.hub.liveNextDayInstance}:{}),
     status:'running',health:'healthy',checkedAt:iso,
-    runningRwWriters:[policy.containers[key].id],dormantAutoRestartRw:[],
+    runningRwWriters:[policy.containers[key].id],dormantAutoRestartRw:[],dormantRwContainers:[],
     dataMount:{source:policy.dataMounts[key],rw:true}});
   const tasks=f.initialData.tasks.map(t=>({id:t.id,workflow:'04',state:'running',
     liveSession:structuredClone(t.runtime.liveSession),nodes:t.runtime.nodes.map(n=>({
@@ -106,9 +147,7 @@ const releaseReadiness=(f,checkedAt)=>{
     routes:{hub:policy.containers.hub.id,calendar:policy.containers.calendar.id,
       dispatch:policy.containers.dispatch.id}},services:{hub:service('hub'),
       calendar:service('calendar'),dispatch:service('dispatch')},
-    backup:{hub:{stoppedWriter:true,verified:true,restoreProbePassed:true,checkedAt:iso,
-      sourceContainerId:policy.containers.hub.id,sourceDataMount:policy.dataMounts.hub}},
-    oaReadback:{authenticated:true,hubId:policy.containers.hub.id,checkedAt:iso}},
+    backup:releaseBackupFixture(policy,captureIso,iso),oaReadback:releaseOaFixture(policy,iso)},
     source:{...structuredClone(f.raw),updatedAt:iso,issues:[],slots:tasks.map(t=>t.liveSession)},
     bindings,identityReadbacks:bindings.map(x=>({...x,active:true,employed:true,
       departmentVerified:true,checkedAt:iso})),state:{tasks,notifications},cardReadbacks,
@@ -119,12 +158,12 @@ const releaseReadiness=(f,checkedAt)=>{
 };
 // Synthetic pinned test configuration is supplied separately from readbacks.
 // It is not a real operator approval or a production collection adapter.
-const releasePolicyOptions=f=>{
-  const readinessPolicy=releaseReadiness(f,firstActivationAt).policy;
+const releasePolicyOptions=(f,syntheticTimeline)=>{
+  const readinessPolicy=releaseReadiness(f,firstActivationAt,syntheticTimeline).policy;
   return {readinessPolicy,externallyPinnedPolicyHash:sha(readinessPolicy)};
 };
-const releaseEvidence=(f,checkedAt)=>{
-  const readiness=releaseReadiness(f,checkedAt).evidence;
+const releaseEvidence=(f,checkedAt,syntheticTimeline)=>{
+  const readiness=releaseReadiness(f,checkedAt,syntheticTimeline).evidence;
   const byId=new Map(readiness.cardReadbacks.map(row=>[row.messageId,row]));
   return {operator:'FD-026222',scopeHash:f.manifest.scopeHash,
   sourceRevision:f.manifest.sourceRevision,gatewayReleaseId:f.manifest.releaseId,
@@ -192,7 +231,9 @@ test('a local release permit is atomically written only after exact external car
     assert.equal(permit.evidenceHash,sha({evidence,readinessPolicyHash:permit.readinessPolicyHash}));
     assert.ok(Date.parse(permit.expiresAt)<=Date.parse('2026-09-24T16:30:00+08:00'));
     assert.equal(JSON.stringify(f.data),original,'permit installation never touches the active task/card ledger');
-    const renewedAt=Date.parse('2026-09-24T16:20:00+08:00');
+    // Renewal may read the same stopped archive, but cannot manufacture a
+    // later capturedAt after the process is already running.
+    const renewedAt=checkedAt+60000;
     let renewed;
     f.job.runtime.store.transaction(s=>{
       s.tasks[0].runtime.nodes[0].liveAcknowledgements=[{kind:'live_ack',attempt:1,by:'A',at:new Date(renewedAt).toISOString()}];
@@ -329,6 +370,74 @@ test('permit signer rejects incomplete same-version source, group and ledger pre
     }finally{if(existsSync(file))unlinkSync(file);rmdirSync(dir);}
   }
 });
+test('permit signer cannot use missing Calendar/Dispatch backups or legacy OA booleans to bypass cutover proof',()=>{
+  const mutations=[
+    ...['hub','calendar','dispatch'].flatMap(key=>[
+      readback=>{delete readback.environment.backup[key];},
+      readback=>{readback.environment.backup[key].sourceDataMount='/wrong';},
+      readback=>{readback.environment.backup[key].stoppedWriter=false;},
+      readback=>{readback.environment.backup[key].restoreProbePassed=false;},
+      readback=>{readback.environment.backup[key].restoredManifestSha256='f'.repeat(64);},
+      readback=>{readback.environment.backup[key].capturedAt='2000-01-01T00:00:00.000Z';},
+      readback=>{delete readback.environment.services[key].dormantRwContainers;},
+      readback=>{readback.environment.services[key].dormantRwContainers=[{id:'old',restart:'no'}];},
+    ]),
+    readback=>{readback.environment.oaReadback={authenticated:true,hubId:'b'.repeat(64),
+      checkedAt:new Date(firstActivationAt).toISOString(),oldLinksAccepted:true};},
+    readback=>{readback.environment.oaReadback.cases=[];readback.environment.oaReadback.oldLinksAccepted=true;},
+    ...['old-action','old-record','personal'].flatMap(kind=>[
+      readback=>{readback.environment.oaReadback.cases.find(x=>x.kind===kind).proofSha256='f'.repeat(64);},
+      readback=>{readback.environment.oaReadback.cases.find(x=>x.kind===kind).actorNumber='other';},
+      readback=>{readback.environment.oaReadback.cases.find(x=>x.kind===kind).capturedAt='2000-01-01T00:00:00.000Z';},
+    ]),
+  ];
+  for(const mutate of mutations){
+    const f=fixture(),dir=permitTestDirectory('wis-next-day-full-cutover-'),file=join(dir,'permit.json');
+    const {privateKey}=generateKeyPairSync('ed25519'),at=firstActivationAt;
+    try{
+      const evidence=releaseEvidence(f,at);mutate(evidence.readiness.evidence);
+      assert.throws(()=>installNextDayReleasePermit(file,{...releasePolicyOptions(f),manifest:releaseManifestAt(f,at),
+        evidence,privateKey,clock:()=>at}),/完整独立预检/);
+      assert.equal(existsSync(file),false);assert.deepEqual(readdirSync(dir),[]);
+    }finally{if(existsSync(file))unlinkSync(file);rmdirSync(dir);}
+  }
+  const f=fixture(),dir=permitTestDirectory('wis-next-day-legacy-oa-policy-'),file=join(dir,'permit.json');
+  const {privateKey}=generateKeyPairSync('ed25519'),at=firstActivationAt,approved=releasePolicyOptions(f);
+  try{
+    const oldPolicy=structuredClone(approved.readinessPolicy);delete oldPolicy.oaAcceptance;
+    assert.throws(()=>installNextDayReleasePermit(file,{readinessPolicy:oldPolicy,externallyPinnedPolicyHash:sha(oldPolicy),
+      manifest:releaseManifestAt(f,at),evidence:releaseEvidence(f,at),privateKey,clock:()=>at}),/完整独立预检/);
+    assert.equal(existsSync(file),false);
+  }finally{if(existsSync(file))unlinkSync(file);rmdirSync(dir);}
+});
+test('release-only or boot-only policy/typed Hub drift cannot sign a different manifest, including renewal',()=>{
+  for(const renewal of [false,true])for(const field of ['release','liveNextDayInstance']){
+    const f=fixture(),dir=permitTestDirectory('wis-next-day-target-instance-'),file=join(dir,'permit.json');
+    const {privateKey}=generateKeyPairSync('ed25519'),at=renewal?firstActivationAt+60000:firstActivationAt;
+    let original=null;
+    try{
+      if(renewal){
+        installNextDayReleasePermit(file,{...releasePolicyOptions(f),manifest:releaseManifestAt(f,firstActivationAt),
+          evidence:releaseEvidence(f,firstActivationAt),privateKey,clock:()=>firstActivationAt});
+        original=readFileSync(file,'utf8');
+      }
+      const evidence=releaseEvidence(f,at),policy=structuredClone(releasePolicyOptions(f).readinessPolicy);
+      const other=field==='release'?'other-approved-build':'other-approved-boot';
+      policy.containers.hub[field]=other;
+      const readback=evidence.readiness.evidence;
+      readback.environment.services.hub[field]=other;readback.environment.oaReadback[field]=other;
+      for(const row of readback.environment.oaReadback.cases)row[field]=other;
+      // Both typed readback and independently pinned policy genuinely agree;
+      // their different target still cannot authorize ORIGINAL in the manifest.
+      assert.equal(evaluateNextDayEvidence(readback,{now:at,mode:renewal?'renewal':'activation',policy}).checksPassed,true);
+      assert.throws(()=>installNextDayReleasePermit(file,{readinessPolicy:policy,externallyPinnedPolicyHash:sha(policy),
+        manifest:releaseManifestAt(f,at),evidence,privateKey,clock:()=>at}),/完整独立预检/);
+      if(renewal)assert.equal(readFileSync(file,'utf8'),original);
+      else assert.equal(existsSync(file),false);
+      assert.deepEqual(readdirSync(dir),renewal?['permit.json']:[]);
+    }finally{if(existsSync(file))unlinkSync(file);rmdirSync(dir);}
+  }
+});
 
 test('permit signer binds preflight to frozen card ID and requires complete bot-person proof',()=>{
   const changes=[
@@ -349,7 +458,7 @@ test('permit signer binds preflight to frozen card ID and requires complete bot-
     try{
       const evidence=releaseEvidence(f,at);change(f,evidence);
       assert.throws(()=>installNextDayReleasePermit(file,{...releasePolicyOptions(f),manifest:releaseManifestAt(f,at),
-        evidence,privateKey,clock:()=>at}),/许可清单不一致|独立读回/);
+        evidence,privateKey,clock:()=>at}),/许可清单不一致|独立读回|完整独立预检/);
       assert.equal(existsSync(file),false);
     }finally{if(existsSync(file))unlinkSync(file);rmdirSync(dir);}
   }
@@ -483,27 +592,48 @@ test('a slow fsync crossing the first activation cutoff leaves no permit file',(
   }finally{rmdirSync(dir);}
 });
 
-test('first activation and renewal recheck nested chat, identity and backup ages after fsync',()=>{
+test('first activation and renewal recheck every nested backup and OA capture/read age after fsync',()=>{
   const nested=[
-    readback=>readback.cardReadbacks[0].personalChat,
-    readback=>readback.identityReadbacks[0],
-    readback=>readback.environment.backup.hub,
+    [readback=>readback.cardReadbacks[0].personalChat,'checkedAt'],
+    [readback=>readback.identityReadbacks[0],'checkedAt'],
+    ...['hub','calendar','dispatch'].flatMap(key=>['capturedAt','checkedAt'].map(field=>[
+      readback=>readback.environment.backup[key],field])),
+    ...['capturedAt','checkedAt'].map(field=>[readback=>readback.environment.oaReadback,field]),
+    ...['module','old-action','old-record','personal'].flatMap(kind=>['capturedAt','checkedAt'].map(field=>[
+      readback=>readback.environment.oaReadback.cases.find(x=>x.kind===kind),field])),
   ];
-  for(const renewal of [false,true])for(const select of nested){
+  for(const renewal of [false,true])for(const [select,field] of nested){
     const f=fixture(),dir=permitTestDirectory('wis-next-day-commit-age-'),file=join(dir,'permit.json');
     const {privateKey,publicKey}=generateKeyPairSync('ed25519');
     const at=renewal?firstActivationAt+60000:firstActivationAt;
+    // A physically ordered source stop/archive/new-start/OA sequence. For a
+    // renewal the same capture and incarnation already existed at the first
+    // installation; no fixture refreshes an archive after its process starts.
+    const timeline={backupCapturedAt:new Date(at-119900).toISOString(),
+      currentStartedAt:new Date(at-119800).toISOString()};
+    if(field==='capturedAt'&&Object.hasOwn(select(releaseEvidence(f,at).readiness.evidence),'sourceContainerId'))
+      timeline.currentStartedAt=new Date(at-119400).toISOString();
+    const approved=releasePolicyOptions(f,timeline);
     let original=null;
     try{
       if(renewal){
-        installNextDayReleasePermit(file,{...releasePolicyOptions(f),
-          manifest:releaseManifestAt(f,firstActivationAt),evidence:releaseEvidence(f,firstActivationAt),
+        installNextDayReleasePermit(file,{...approved,
+          manifest:releaseManifestAt(f,firstActivationAt),evidence:releaseEvidence(f,firstActivationAt,timeline),
           privateKey,clock:()=>firstActivationAt});
         original=readFileSync(file,'utf8');
       }
-      const evidence=releaseEvidence(f,at),times=[at,at+1000];
-      select(evidence.readiness.evidence).checkedAt=new Date(at-119500).toISOString();
-      assert.throws(()=>installNextDayReleasePermit(file,{...releasePolicyOptions(f),
+      const evidence=releaseEvidence(f,at,timeline),times=[at,at+1000];
+      const row=select(evidence.readiness.evidence);
+      row[field]=new Date(at-119500).toISOString();
+      // The archive/DOM capture must predate its readback. For checkedAt
+      // expiry tests, keep capture equally old so the initial proof is valid.
+      if(field==='checkedAt'&&Object.hasOwn(row,'capturedAt'))row.capturedAt=row.checkedAt;
+      // An archive capture cannot move after its new process starts. Keep it
+      // on the valid stopped-source side when only its readback is aged.
+      if(field==='checkedAt'&&Object.hasOwn(row,'sourceContainerId'))row.capturedAt=timeline.backupCapturedAt;
+      assert.equal(evaluateNextDayEvidence(evidence.readiness.evidence,{now:at,
+        mode:renewal?'renewal':'activation',policy:approved.readinessPolicy}).checksPassed,true);
+      assert.throws(()=>installNextDayReleasePermit(file,{...approved,
         manifest:releaseManifestAt(f,at),evidence,privateKey,clock:()=>times.shift()}),/完整独立预检/);
       if(renewal){
         assert.equal(readFileSync(file,'utf8'),original,'failed renewal preserves the old signed permit');
@@ -575,7 +705,7 @@ test('same Hub rejects rollback to an older signed activation and clock rollback
     const reader=createNextDayReleaseReader(file,{publicKey,releaseId:f.job.releaseId,
       bootId:f.job.bootId,clock:()=>now});
     assert.deepEqual(reader(),original);
-    now+=20*60000;
+    now+=60000;
     const renewed=installNextDayReleasePermit(file,{...releasePolicyOptions(f),manifest:{...f.manifest,preparedAt:new Date(now).toISOString()},
       evidence:releaseEvidence(f,now),privateKey,clock:()=>now});
     assert.deepEqual(reader(),renewed);

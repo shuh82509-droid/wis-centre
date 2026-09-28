@@ -8,9 +8,10 @@ const sha=x=>createHash('sha256').update(JSON.stringify(x)).digest('hex');
 const dateAt=ms=>new Date(ms+8*3600000).toISOString().slice(0,10);
 const keyTopology=x=>{
   const g=x?.gateway||{},service=key=>{const s=x?.services?.[key]||{};return {
-    id:s.id,image:s.image,status:s.status,health:s.health,
+    id:s.id,image:s.image,status:s.status,health:s.health,startedAt:s.startedAt,
+    release:s.release,liveNextDayInstance:s.liveNextDayInstance,
     dataMount:s.dataMount,runningRwWriters:s.runningRwWriters,
-    dormantAutoRestartRw:s.dormantAutoRestartRw};};
+    dormantAutoRestartRw:s.dormantAutoRestartRw,dormantRwContainers:s.dormantRwContainers};};
   return sha({gateway:{id:g.id,image:g.image,status:g.status,health:g.health,
     routes:g.routes,configHash:g.configHash},
     services:Object.fromEntries(['hub','calendar','dispatch'].map(k=>[k,service(k)]))});
@@ -117,7 +118,16 @@ export async function collectReadOnlyEvidence({ops,policy,now=Date.now(),concurr
   if(!policy?.approvedGroupTestMessageId)issues.push('approved_group_test_id_missing');
   else if(groupTest&&groupTest.messageId!==policy.approvedGroupTestMessageId)
     issues.push('approved_group_test_message_id_mismatch');
-  const backup=await attempt('stopped_writer_backup',()=>ops.readBackup(first));
+  // One read-only adapter call returns all three independently verified
+  // archives. Never clone Hub evidence into another role or fill from policy.
+  const rawBackup=await attempt('stopped_writer_backup',()=>ops.readBackup(first));
+  const backup=Object.fromEntries(['hub','calendar','dispatch'].map(key=>{
+    const row=rawBackup?.[key];
+    if(!row||typeof row!=='object'||Array.isArray(row)){
+      issues.push(`stopped_writer_backup_${key}_missing`);return [key,null];
+    }
+    return [key,row];
+  }));
   const oaReadback=await attempt('real_oa_page',()=>ops.readOaPage(first));
   const last=await attempt('topology_final',()=>ops.readTopology());
   if(!first||!last||keyTopology(first)!==keyTopology(last))issues.push('topology_changed_during_collection');
