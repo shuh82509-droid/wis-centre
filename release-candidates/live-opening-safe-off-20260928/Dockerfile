@@ -1,0 +1,2 @@
+FROM sha256:e54e3e7cbdb8602c8b07129d53b7436fb2edcec91d33c0333c3182ec2825a6cc
+COPY opening-notifications.mjs /app/opening-notifications.mjs
