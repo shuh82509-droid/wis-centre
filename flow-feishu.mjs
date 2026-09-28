@@ -23,6 +23,25 @@ function dueForFlush(n,now){
   return n.state==='ready'&&(n.nextAt<=now||n.unknown)||
     n.state==='sending'&&n.leaseUntil<=now;
 }
+function freshBusinessSource(task,now){
+  const source=task?.runtime?.localBusiness||task?.runtime?.creative;
+  if(!source)return true;
+  const checked=typeof source.checkedAt==='string'?Date.parse(source.checkedAt):NaN;
+  return !source.issue&&Number.isFinite(checked)&&checked<=now&&now-checked<=45000;
+}
+function nextFlushNotice(snapshot,now,remaining){
+  // Source-blocked notices remain queued, but must not consume the five-send
+  // budget forever ahead of independent workflows. Match tasks.find's first
+  // row semantics; do not accidentally prefer a duplicate later task.
+  const tasks=new Map();for(const task of snapshot.tasks||[])if(!tasks.has(task.id))tasks.set(task.id,task);
+  return (snapshot.flowNotifications||[]).find(notice=>{
+    if(!remaining.has(notice.id)||!dueForFlush(notice,now))return false;
+    // Durable intents and unknown/expired leases must reach the existing
+    // fail-closed hold even when their business source is unavailable.
+    return notice.futureEvidence||notice.unknown||notice.state==='sending'||
+      freshBusinessSource(tasks.get(notice.taskId),now);
+  });
+}
 function routesToLiveCards(n,t,cards){
   return !!(t?.workflow==='04'&&t.runtime?.liveSession&&cards?.has(n.recipient)&&
     (n.nodeId?cards.handles(n.recipient,n.nodeId):['pause','resume','cancel'].includes(n.kind)));
@@ -174,9 +193,9 @@ export class FlowFeishu{
       n.futureEvidence?.phase==='verifying'&&(!n.nextVerifyAt||n.nextVerifyAt<=this.clock())).slice(0,5);
     for(const row of pending)await this.verifyFutureReadback(row.id);
   }
-  async flush(){if(this.flushing||!this.appId||!this.secret)return;this.flushing=true;try{await this.verifyPendingFutureReadbacks();if(!this.enabled)return;for(let i=0;i<5;i++){
-   const snapshot=this.store.read();const due=(snapshot.flowNotifications||[]).some(n=>dueForFlush(n,this.clock()));if(!due)break;
-   const lease=this.store.transaction(s=>{const n=(s.flowNotifications||[]).find(n=>dueForFlush(n,this.clock()));if(!n)return null;if(n.futureEvidence){n.state='attention';n.unknown=true;n.error='本人消息存在已落盘的发送意图，结果待只读核验；禁止再次 POST';delete n.leaseId;delete n.leaseUntil;return null;}if(holdUncertainNotice(n))return null;if(isNextDayNotice(n)&&!currentNextDayReleaseLease(this.readNextDayPermit(),n,this.clock(),{releaseId:this.releaseId,bootId:this.bootId})){retireInvalidNotice(n,{expiredLease:n.state==='sending'});return null;}const t=s.tasks.find(t=>t.id===n.taskId);const node=t?.runtime.nodes.find(x=>x.id===n.nodeId);const source=t?.runtime.localBusiness||t?.runtime.creative;if(source&&(source.issue||!source.checkedAt||this.clock()-Date.parse(source.checkedAt)>45000)){n.nextAt=this.clock()+30000;return null;}if(t?.runtime.creative&&n.kind==='completed'&&t.runtime.state!=='completed'){retireInvalidNotice(n,{expiredLease:n.state==='sending'});return null;}if(!currentNodeNotice(n,t,node,this.clock())||!currentNextDayGroup(n,s,this.clock())||!t||n.kind==='routing_attention'&&!Object.keys(t.runtime.routingIssues||{}).length||n.kind==='source_attention'&&(!t.runtime.automation?.issue||t.runtime.state!=='running'||n.reason&&n.reason!==t.runtime.automation.issue)||n.kind==='assignment_attention'&&(!t.runtime.assignmentIssue||t.runtime.state!=='running')||n.kind==='handoff_blocked'&&t.runtime.handoff?.state!=='attention'||['ready','overdue','escalated','returned'].includes(n.kind)&&(t.runtime.state!=='running'||node?.state!=='ready'||node.attempt!==n.attempt||n.kind==='ready'&&node.owner.number!==n.recipient)){retireInvalidNotice(n,{expiredLease:n.state==='sending'});return null;}n.firstAttemptAt??=new Date(this.clock()).toISOString();n.state='sending';n.attempts++;n.leaseId=randomUUID();n.leaseUntil=this.clock()+45000;return {notice:n,task:t};});if(!lease)continue;
+  async flush(){if(this.flushing||!this.appId||!this.secret)return;this.flushing=true;try{await this.verifyPendingFutureReadbacks();if(!this.enabled)return;const batchNow=this.clock(),remaining=new Set((this.store.read().flowNotifications||[]).filter(n=>dueForFlush(n,batchNow)).map(n=>n.id));for(let leases=0;leases<5;){
+   const snapshot=this.store.read(),candidate=nextFlushNotice(snapshot,this.clock(),remaining);if(!candidate)break;remaining.delete(candidate.id);
+   const lease=this.store.transaction(s=>{const n=(s.flowNotifications||[]).find(n=>n.id===candidate.id);if(!n||!dueForFlush(n,this.clock()))return null;if(n.futureEvidence){n.state='attention';n.unknown=true;n.error='本人消息存在已落盘的发送意图，结果待只读核验；禁止再次 POST';delete n.leaseId;delete n.leaseUntil;return null;}if(holdUncertainNotice(n))return null;if(isNextDayNotice(n)&&!currentNextDayReleaseLease(this.readNextDayPermit(),n,this.clock(),{releaseId:this.releaseId,bootId:this.bootId})){retireInvalidNotice(n,{expiredLease:n.state==='sending'});return null;}const t=s.tasks.find(t=>t.id===n.taskId);const node=t?.runtime.nodes.find(x=>x.id===n.nodeId);if(!freshBusinessSource(t,this.clock())){n.nextAt=this.clock()+30000;return null;}if(t?.runtime.creative&&n.kind==='completed'&&t.runtime.state!=='completed'){retireInvalidNotice(n,{expiredLease:n.state==='sending'});return null;}if(!currentNodeNotice(n,t,node,this.clock())||!currentNextDayGroup(n,s,this.clock())||!t||n.kind==='routing_attention'&&!Object.keys(t.runtime.routingIssues||{}).length||n.kind==='source_attention'&&(!t.runtime.automation?.issue||t.runtime.state!=='running'||n.reason&&n.reason!==t.runtime.automation.issue)||n.kind==='assignment_attention'&&(!t.runtime.assignmentIssue||t.runtime.state!=='running')||n.kind==='handoff_blocked'&&t.runtime.handoff?.state!=='attention'||['ready','overdue','escalated','returned'].includes(n.kind)&&(t.runtime.state!=='running'||node?.state!=='ready'||node.attempt!==n.attempt||n.kind==='ready'&&node.owner.number!==n.recipient)){retireInvalidNotice(n,{expiredLease:n.state==='sending'});return null;}n.firstAttemptAt??=new Date(this.clock()).toISOString();n.state='sending';n.attempts++;n.leaseId=randomUUID();n.leaseUntil=this.clock()+45000;return {notice:n,task:t};});if(!lease)continue;leases++;
    const n=lease.notice;
    if(routesToLiveCards(n,lease.task,this.liveCards)&&!this.liveCards.ready()){
      this.store.transaction(s=>{const row=s.flowNotifications.find(x=>x.id===n.id);if(row?.leaseId!==n.leaseId)return;row.state='ready';row.attempts--;row.nextAt=this.clock()+30000;row.error='飞书卡片通道待恢复，尚未发送';delete row.leaseId;delete row.leaseUntil;});continue;
