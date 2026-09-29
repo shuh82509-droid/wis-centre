@@ -1,0 +1,287 @@
+{
+  "scope": "exact-58a-source-only-synthetic-qa",
+  "productionDeployable": false,
+  "productionCutover": false,
+  "realBusinessAcceptance": false,
+  "originalSender": "58a94eb60df9021193c9b23480b73910ef857ade0428b655f21566e83954a635",
+  "candidateSender": "cae7fc8df477f14d851df939e58d27d4121a6f955f543d755bae15cb5d939e6c",
+  "testSha256": "061b6fe8e03ba7e43e0d2cff107caa0e70b471e46ac546a80c5d7ec5fd4b26f8",
+  "caseMatrixSha256": "3c0b13eeb40c8270330a2fb0197c63198e094e54505991055e66c99b0db283ef",
+  "manifestSha256": "f773d1e9c72a8e9d48ab0220b742eeaa4ea6e3e57753e58fa7d04dd7efa1beae",
+  "entrySha256": "c27774ce8bb95fca0f23b9ae4535564c14f9fedaf03341a7112762a8709a77a6",
+  "actualCases": 114,
+  "pass": 114,
+  "fail": 0,
+  "cancelled": 0,
+  "skipped": 0,
+  "todo": 0,
+  "allFixedCaseTitlesMatch": true,
+  "rawTapSha256": "a3d9a769b660610e71901557fb9dcc9741d0f9a10ca34989ecacfb10a4e82921",
+  "rawTapBytes": 26695,
+  "qaContainerId": "43574536c3c35cd1ae5cc160b47f6af2f5bdac6fb8634bc38813f555e9785dba",
+  "runnerImage": "sha256:48e4b67d85f87bd551df43704e24d252f56cc5f8e9718841aace50f19948f0f9",
+  "finalState": {
+    "Status": "exited",
+    "Running": false,
+    "Paused": false,
+    "Restarting": false,
+    "OOMKilled": false,
+    "Pid": 0,
+    "ExitCode": 0,
+    "Error": "",
+    "StartedAt": "2026-09-29T06:53:59.913500327Z",
+    "FinishedAt": "2026-09-29T06:54:00.801658048Z"
+  },
+  "finalRestartCount": 0,
+  "effectiveStartupChecks": {
+    "capDrop": true,
+    "cmd": true,
+    "entrypoint": true,
+    "envKeys": true,
+    "image": true,
+    "limits": true,
+    "mount": true,
+    "networkNone": true,
+    "noHealthcheck": true,
+    "noHostNamespaces": true,
+    "noNewPrivileges": true,
+    "noPorts": true,
+    "notStarted": true,
+    "privilegedFalse": true,
+    "readOnly": true,
+    "restart": true,
+    "scopeLabel": true,
+    "tmpfs": true,
+    "user": true,
+    "workdir": true
+  },
+  "effectiveStoppedChecks": {
+    "image": true,
+    "networkNone": true,
+    "readOnly": true,
+    "user": true,
+    "entrypoint": true,
+    "cmd": true,
+    "workdir": true,
+    "restart": true,
+    "capDrop": true,
+    "noNewPrivileges": true,
+    "limits": true,
+    "tmpfs": true,
+    "noPorts": true,
+    "noHostNamespaces": true,
+    "noHealthcheck": true,
+    "privilegedFalse": true,
+    "envKeys": true,
+    "scopeLabel": true,
+    "mount": true
+  },
+  "preservedFirstAttempt": {
+    "actualCases": 107,
+    "pass": 106,
+    "fail": 1,
+    "failedCase": 65,
+    "rawTapSha256": "967ff39e9ca90d39277207a5796d31ab6907651e4e4a437c9f0695fd97ed1022",
+    "discardedOrWeakenedAssertions": false
+  },
+  "sourceFiles": [
+    {
+      "path": "BASELINE-PROOF.json",
+      "bytes": 3044,
+      "sha256": "be33bf622026d22b82dd3b958d9141ac053112830db4dfeca0a32bdc77413c3e"
+    },
+    {
+      "path": "baseline/flow-catalog.mjs",
+      "bytes": 5657,
+      "sha256": "26f2b8c009d19d21753a3968bb760e6b80be23d48f89593da86569582d8cac4c"
+    },
+    {
+      "path": "baseline/flow-definitions.mjs",
+      "bytes": 52850,
+      "sha256": "0ec1d5834a4dd4c52ebeb02254a61e3828c408b6156da3b925dd73029b9ce2a8"
+    },
+    {
+      "path": "baseline/flow-evidence.mjs",
+      "bytes": 8327,
+      "sha256": "e65fbcb222f3c4631cc53cce1c6efb14199b351abfbc17988fd5750e4d1c7f4b"
+    },
+    {
+      "path": "baseline/flow-feishu.mjs",
+      "bytes": 11846,
+      "sha256": "58a94eb60df9021193c9b23480b73910ef857ade0428b655f21566e83954a635"
+    },
+    {
+      "path": "baseline/flow-locations.mjs",
+      "bytes": 748,
+      "sha256": "f1a69978b20ac5db7f992c30f037a5f344705298a80661d77aff3dc0ae94c98e"
+    },
+    {
+      "path": "baseline/flow-model.mjs",
+      "bytes": 5779,
+      "sha256": "6d5b6f81820c9ba593f0fe914e3842c650cd3b917190ecdfa6084064663ed4ee"
+    },
+    {
+      "path": "baseline/flow-notice-validity.mjs",
+      "bytes": 2435,
+      "sha256": "be08a5cddc55a69a7a7798ee74a82b3e06781c1f8ff9806644a409f9fca8e80f"
+    },
+    {
+      "path": "baseline/flow-product.mjs",
+      "bytes": 467,
+      "sha256": "c8b4cc9a66ea825a5de029ea3f86d3bbdf7f81564e0e6cc37a27cd033f1854df"
+    },
+    {
+      "path": "baseline/flow-runtime.mjs",
+      "bytes": 35651,
+      "sha256": "c09903abced2bd42548c4639341a52f9eca8d55f13f9989cbbc156e6e74f214c"
+    },
+    {
+      "path": "baseline/hr-data.mjs",
+      "bytes": 22710,
+      "sha256": "e4b0b3be8273862ebea24728adc3e4997ce9da9137593af3b923a01b1d4a0756"
+    },
+    {
+      "path": "baseline/live-feishu-participants.mjs",
+      "bytes": 4984,
+      "sha256": "b043a6ec858af26b47e426e8650235c3679cc34e2c9bebb8eabf74e906d62d3b"
+    },
+    {
+      "path": "baseline/live-next-day.mjs",
+      "bytes": 15854,
+      "sha256": "1c8bd853d58065f85287be896ae42930147f764b017f7c8c616bd167d0405b4e"
+    },
+    {
+      "path": "baseline/live-session-flow.mjs",
+      "bytes": 22123,
+      "sha256": "92fec5cd6a2178dfc74b3891da2ab959ec5383d262c74a924f5d716a9881d42c"
+    },
+    {
+      "path": "baseline/task-workflow.mjs",
+      "bytes": 19974,
+      "sha256": "0fe8dd453b96b7eb2a5df7bbd5a57ede1fd93aafa0e40d67abd344fb15bde45c"
+    },
+    {
+      "path": "baseline/workflow-cloud.mjs",
+      "bytes": 6801,
+      "sha256": "c0f0415e7e5279586d6dbe5ccd74b1e9b802e6810993bee0ae3b9dffa1d563b6"
+    },
+    {
+      "path": "baseline/workflow-store.mjs",
+      "bytes": 5097,
+      "sha256": "2e1637b0a8f5d0f486a6b0c9de9841b6cce7762e7dedf905338fd0a784546c68"
+    },
+    {
+      "path": "candidate/flow-catalog.mjs",
+      "bytes": 5657,
+      "sha256": "26f2b8c009d19d21753a3968bb760e6b80be23d48f89593da86569582d8cac4c"
+    },
+    {
+      "path": "candidate/flow-definitions.mjs",
+      "bytes": 52850,
+      "sha256": "0ec1d5834a4dd4c52ebeb02254a61e3828c408b6156da3b925dd73029b9ce2a8"
+    },
+    {
+      "path": "candidate/flow-evidence.mjs",
+      "bytes": 8327,
+      "sha256": "e65fbcb222f3c4631cc53cce1c6efb14199b351abfbc17988fd5750e4d1c7f4b"
+    },
+    {
+      "path": "candidate/flow-feishu.mjs",
+      "bytes": 15266,
+      "sha256": "cae7fc8df477f14d851df939e58d27d4121a6f955f543d755bae15cb5d939e6c"
+    },
+    {
+      "path": "candidate/flow-locations.mjs",
+      "bytes": 748,
+      "sha256": "f1a69978b20ac5db7f992c30f037a5f344705298a80661d77aff3dc0ae94c98e"
+    },
+    {
+      "path": "candidate/flow-model.mjs",
+      "bytes": 5779,
+      "sha256": "6d5b6f81820c9ba593f0fe914e3842c650cd3b917190ecdfa6084064663ed4ee"
+    },
+    {
+      "path": "candidate/flow-notice-validity.mjs",
+      "bytes": 2435,
+      "sha256": "be08a5cddc55a69a7a7798ee74a82b3e06781c1f8ff9806644a409f9fca8e80f"
+    },
+    {
+      "path": "candidate/flow-product.mjs",
+      "bytes": 467,
+      "sha256": "c8b4cc9a66ea825a5de029ea3f86d3bbdf7f81564e0e6cc37a27cd033f1854df"
+    },
+    {
+      "path": "candidate/flow-runtime.mjs",
+      "bytes": 35651,
+      "sha256": "c09903abced2bd42548c4639341a52f9eca8d55f13f9989cbbc156e6e74f214c"
+    },
+    {
+      "path": "candidate/hr-data.mjs",
+      "bytes": 22710,
+      "sha256": "e4b0b3be8273862ebea24728adc3e4997ce9da9137593af3b923a01b1d4a0756"
+    },
+    {
+      "path": "candidate/live-feishu-participants.mjs",
+      "bytes": 4984,
+      "sha256": "b043a6ec858af26b47e426e8650235c3679cc34e2c9bebb8eabf74e906d62d3b"
+    },
+    {
+      "path": "candidate/live-next-day.mjs",
+      "bytes": 15854,
+      "sha256": "1c8bd853d58065f85287be896ae42930147f764b017f7c8c616bd167d0405b4e"
+    },
+    {
+      "path": "candidate/live-session-flow.mjs",
+      "bytes": 22123,
+      "sha256": "92fec5cd6a2178dfc74b3891da2ab959ec5383d262c74a924f5d716a9881d42c"
+    },
+    {
+      "path": "candidate/task-workflow.mjs",
+      "bytes": 19974,
+      "sha256": "0fe8dd453b96b7eb2a5df7bbd5a57ede1fd93aafa0e40d67abd344fb15bde45c"
+    },
+    {
+      "path": "candidate/workflow-cloud.mjs",
+      "bytes": 6801,
+      "sha256": "c0f0415e7e5279586d6dbe5ccd74b1e9b802e6810993bee0ae3b9dffa1d563b6"
+    },
+    {
+      "path": "candidate/workflow-store.mjs",
+      "bytes": 5097,
+      "sha256": "2e1637b0a8f5d0f486a6b0c9de9841b6cce7762e7dedf905338fd0a784546c68"
+    },
+    {
+      "path": "EXACT-PAYLOAD-PROOF.json",
+      "bytes": 6219,
+      "sha256": "f773d1e9c72a8e9d48ab0220b742eeaa4ea6e3e57753e58fa7d04dd7efa1beae"
+    },
+    {
+      "path": "qa-entry.mjs",
+      "bytes": 4105,
+      "sha256": "c27774ce8bb95fca0f23b9ae4535564c14f9fedaf03341a7112762a8709a77a6"
+    },
+    {
+      "path": "qa/exact-fairness.test.mjs",
+      "bytes": 42188,
+      "sha256": "061b6fe8e03ba7e43e0d2cff107caa0e70b471e46ac546a80c5d7ec5fd4b26f8"
+    }
+  ],
+  "providerMessagesSentByQa": false,
+  "limitations": [
+    "Synthetic fetch and toy native WorkflowStore only.",
+    "Native transaction fault wrappers, not injected kernel fsync/rename or power-loss faults.",
+    "Two senders share one Node process; no distributed queue claim.",
+    "No real OAuth/source rights/OA/old-link/recipient/message/business-completion acceptance.",
+    "No preexisting unknown/intent recovery or automatic/manual resend release.",
+    "This archive must not replace the repository root runtime or be enabled/deployed."
+  ],
+  "exclusions": [
+    "credentials",
+    "business stores or messages",
+    "raw production observations and source snapshots",
+    "raw TAP or provider logs",
+    "SSH/deploy launchers",
+    "images",
+    "default server entrypoint"
+  ]
+}

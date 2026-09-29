@@ -1,0 +1,3 @@
+# Preserve the exact source/test/provenance bytes verified in isolated Linux QA.
+* -text
+README.md text eol=lf
